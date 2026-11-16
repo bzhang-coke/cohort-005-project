@@ -1,4 +1,5 @@
-import { Outlet } from "react-router";
+import { Outlet, useLocation } from "react-router";
+import { NotificationFeedPrototype } from "~/components/notification-feed.prototype";
 import type { Route } from "./+types/layout.app";
 import { Sidebar } from "~/components/sidebar";
 import { DevUI } from "~/components/dev-ui";
@@ -185,7 +186,11 @@ export async function loader({ request }: Route.LoaderArgs) {
           course.courseId
         );
         const totalLessons = getTotalLessonCount(course.courseId);
-        const progress = calculateProgress(currentUserId, course.courseId, false);
+        const progress = calculateProgress(
+          currentUserId,
+          course.courseId,
+          false
+        );
         return {
           courseId: course.courseId,
           title: course.courseTitle,
@@ -217,6 +222,11 @@ export async function loader({ request }: Route.LoaderArgs) {
 }
 
 export default function AppLayout({ loaderData }: Route.ComponentProps) {
+  const location = useLocation();
+  const showNotificationPrototype =
+    import.meta.env.DEV &&
+    location.pathname === "/dashboard" &&
+    new URLSearchParams(location.search).has("variant");
   const {
     users,
     currentUser,
@@ -228,14 +238,26 @@ export default function AppLayout({ loaderData }: Route.ComponentProps) {
   } = loaderData;
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div
+      className={`flex h-screen overflow-hidden ${showNotificationPrototype ? "[&>aside]:hidden md:[&>aside]:flex" : ""}`}
+    >
       <Sidebar
         currentUser={currentUser}
         recentCourses={recentCourses}
         isTeamAdmin={userIsTeamAdmin}
       />
-      <main className="flex-1 overflow-y-auto">
-        <Outlet />
+      <main className="min-w-0 flex-1 overflow-y-auto">
+        {showNotificationPrototype ? (
+          <NotificationFeedPrototype
+            key={currentUser?.id ?? "anonymous"}
+            currentUser={currentUser}
+            isTeamAdmin={userIsTeamAdmin}
+          >
+            <Outlet />
+          </NotificationFeedPrototype>
+        ) : (
+          <Outlet />
+        )}
       </main>
       <DevUI
         users={users}
