@@ -7,12 +7,29 @@ import {
   type NotificationCategory,
   type NotificationSettings,
   type NotificationEvent,
+  type CommentNotificationArchive,
 } from "./notifications";
 import type {
   NotificationPerson,
   NotificationTransport,
 } from "./notifications/transport.server";
 import { getNotificationTransport } from "./notifications/config.server";
+
+export async function archiveCommentNotifications(
+  source: CommentNotificationArchive,
+  injectedTransport?: NotificationTransport
+) {
+  try {
+    await (injectedTransport ?? getNotificationTransport()).archiveComment(
+      source
+    );
+  } catch (error) {
+    console.error(
+      `Notification archival failed for comment ${source.commentId}.`,
+      error
+    );
+  }
+}
 
 // Called only after the entire domain write commits. Each catalogue event is
 // independent; a failed attempt must not stop another event or existing email.
