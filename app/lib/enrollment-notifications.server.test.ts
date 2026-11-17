@@ -1,10 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
-import { courses, enrollments, purchases, users } from "~/db/schema";
+import {
+  courses,
+  enrollments,
+  purchases,
+  users,
+  UserRole,
+  modules,
+  lessons,
+  lessonProgress,
+  LessonProgressStatus,
+} from "~/db/schema";
 import { submitIndividualPurchase } from "./enrollments.server";
 import { createFakeNotificationTransport } from "./notifications/fake.server";
 import { syncNotificationPerson } from "./notifications.server";
+import { raiseRefundRequest, approveRefundRequest } from "./refunds.server";
 
 const NOW = new Date("2026-11-17T12:00:00.000Z");
 let db: ReturnType<typeof createTestDb>;
@@ -227,5 +238,83 @@ describe("Enrollment Notification delivery", () => {
       context: "Test Course",
       snapshot: { studentName: "Test User", courseTitle: "Test Course" },
     });
+  });
+
+  it("notifies for a genuinely new Individual Purchase Enrollment after lapse without losing progress", async () => {
+    await optIn();
+    const original = await submitIndividualPurchase(
+      db,
+      base.user.id,
+      base.course.id,
+      "PL",
+      NOW,
+      { notifications }
+    );
+    if (!original.ok) throw new Error(original.error);
+    const module = db
+      .insert(modules)
+      .values({ courseId: base.course.id, title: "Basics", position: 1 })
+      .returning()
+      .get();
+    const lesson = db
+      .insert(lessons)
+      .values({ moduleId: module.id, title: "First lesson", position: 1 })
+      .returning()
+      .get();
+    const progress = db
+      .insert(lessonProgress)
+      .values({
+        userId: base.user.id,
+        lessonId: lesson.id,
+        status: LessonProgressStatus.InProgress,
+      })
+      .returning()
+      .get();
+    const admin = db
+      .insert(users)
+      .values({
+        name: "Platform Admin",
+        email: "admin@example.com",
+        role: UserRole.Admin,
+      })
+      .returning()
+      .get();
+    const request = raiseRefundRequest(
+      db,
+      original.purchase.id,
+      base.user.id,
+      "Need to leave for now.",
+      NOW
+    );
+    if (!request.ok) throw new Error(request.error);
+    expect(
+      approveRefundRequest(db, request.refundRequestId, admin.id, null, NOW).ok
+    ).toBe(true);
+    expect(db.select().from(enrollments).all()).toEqual([]);
+
+    const returned = await submitIndividualPurchase(
+      db,
+      base.user.id,
+      base.course.id,
+      "PL",
+      NOW,
+      { notifications }
+    );
+
+    if (!returned.ok) throw new Error(returned.error);
+    expect(returned.enrollment.id).not.toBe(original.enrollment.id);
+    expect(
+      notifications.deliveries.map((event) => event.idempotencyKey)
+    ).toEqual([
+      `cadence:enrollment-created:${original.enrollment.id}`,
+      `cadence:enrollment-created:${returned.enrollment.id}`,
+    ]);
+    expect(
+      notifications.deliveries.map((event) => event.data.destination)
+    ).toEqual([
+      `/instructor/${base.course.id}/students#student-${base.user.id}`,
+      `/instructor/${base.course.id}/students#student-${base.user.id}`,
+    ]);
+    expect(db.select().from(lessonProgress).all()).toEqual([progress]);
   });
 });
