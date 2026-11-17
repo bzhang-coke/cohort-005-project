@@ -772,28 +772,48 @@ it("keeps an in-flight refresh queued when another live event arrives", async ()
   feed.dispose();
 });
 
-it("activates exact destinations and marks rows read without navigating when only their checkmark is used", async () => {
-  const client = createFakeNotificationFeedClient([
-    { ...row, destination: "/courses/typescript/lessons/4#comment-12" },
-  ]);
-  const feed = createNotificationFeedController({
-    credentials: async () => ({
-      mode: "live",
-      personId: 7,
-      publicApiKey: "public",
-      feedChannelId: "feed",
-      userToken: "signed",
-      expiresAt: 9999999999999,
-    }),
-    connect: () => client,
-  });
-  await feed.setPerson(7);
-  await feed.setOpen(true);
-  await feed.markRead(row.id);
-  expect(feed.getSnapshot().open).toBe(true);
-  expect(await feed.activate(row.id)).toBe(
-    "/courses/typescript/lessons/4#comment-12"
-  );
-  expect(feed.getSnapshot().open).toBe(false);
-  feed.dispose();
-});
+it.each([
+  {
+    category: "discussionQuestions" as const,
+    destination: "/courses/typescript/lessons/4#comment-12",
+  },
+  { category: "seatClaims" as const, destination: "/team#seat-12" },
+])(
+  "activates $category destinations and marks rows read without navigating when only their checkmark is used",
+  async ({ category, destination }) => {
+    const client = createFakeNotificationFeedClient([
+      {
+        ...row,
+        category,
+        destination,
+        actor: {
+          name: "Test Student",
+          avatarUrl: "/student-avatar.png",
+        },
+      },
+    ]);
+    const feed = createNotificationFeedController({
+      credentials: async () => ({
+        mode: "live",
+        personId: 7,
+        publicApiKey: "public",
+        feedChannelId: "feed",
+        userToken: "signed",
+        expiresAt: 9999999999999,
+      }),
+      connect: () => client,
+    });
+    await feed.setPerson(7);
+    await feed.setOpen(true);
+    await feed.markRead(row.id);
+    expect(feed.getSnapshot().open).toBe(true);
+    expect(feed.getSnapshot().items[0]).toMatchObject({
+      read: true,
+      category,
+      actor: { avatarUrl: "/student-avatar.png" },
+    });
+    expect(await feed.activate(row.id)).toBe(destination);
+    expect(feed.getSnapshot().open).toBe(false);
+    feed.dispose();
+  }
+);

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import {
@@ -15,11 +15,19 @@ import {
   quizAttempts,
   quizzes,
   teams,
+  teamMembers,
+  TeamMemberRole,
   users,
   UserRole,
   videoWatchEvents,
 } from "~/db/schema";
-import { claimSeat, createIndividualPurchase } from "./enrollments.server";
+import {
+  claimSeat,
+  createIndividualPurchase,
+  submitSeatClaim,
+} from "./enrollments.server";
+import { createFakeNotificationTransport } from "./notifications/fake.server";
+import { defaultNotificationPreferences } from "./notifications";
 import {
   approveRefundRequest,
   declineRefundRequest,
@@ -77,6 +85,371 @@ function unclaimedSeat(country: string | null = "PL") {
     .returning()
     .get();
 }
+
+function teamLicence() {
+  const owner = db
+    .insert(users)
+    .values({
+      name: "Licence Buyer",
+      email: "buyer@example.com",
+      role: UserRole.Student,
+    })
+    .returning()
+    .get();
+  const otherAdmin = db
+    .insert(users)
+    .values({
+      name: "Other Team Admin",
+      email: "team-admin@example.com",
+      role: UserRole.Student,
+    })
+    .returning()
+    .get();
+  const team = db.insert(teams).values({}).returning().get();
+  db.insert(teamMembers)
+    .values(
+      [owner, otherAdmin].map((person) => ({
+        teamId: team.id,
+        userId: person.id,
+        role: TeamMemberRole.Admin,
+      }))
+    )
+    .run();
+  const purchase = db
+    .insert(purchases)
+    .values({
+      userId: owner.id,
+      courseId: base.course.id,
+      amountPaid: 22396,
+      country: "PL",
+      createdAt: "2026-11-16T12:00:00.000Z",
+    })
+    .returning()
+    .get();
+  const seats = db
+    .insert(coupons)
+    .values(
+      ["FIRST", "SECOND", "THIRD", "REFUNDED"].map((code) => ({
+        teamId: team.id,
+        courseId: base.course.id,
+        purchaseId: purchase.id,
+        code,
+        refundedAt: code === "REFUNDED" ? NOW.toISOString() : null,
+      }))
+    )
+    .returning()
+    .all();
+  const otherPurchase = db
+    .insert(purchases)
+    .values({
+      userId: otherAdmin.id,
+      courseId: base.course.id,
+      amountPaid: 5599,
+      country: "PL",
+    })
+    .returning()
+    .get();
+  db.insert(coupons)
+    .values({
+      teamId: team.id,
+      courseId: base.course.id,
+      purchaseId: otherPurchase.id,
+      code: "OTHER-LICENCE",
+    })
+    .run();
+  return { owner, otherAdmin, purchase, seats };
+}
+
+describe("Seat claim Notifications", () => {
+  it("does not notify when the Enrollment write rolls the Seat claim back", async () => {
+    const { seats } = teamLicence();
+    const notifications = createFakeNotificationTransport();
+    db.run(sql`
+      CREATE TEMP TRIGGER reject_enrollment BEFORE INSERT ON enrollments
+      BEGIN SELECT RAISE(ABORT, 'Enrollment storage unavailable'); END
+    `);
+
+    await expect(
+      submitSeatClaim(db, seats[0].code, base.user.id, "PL", NOW, {
+        notifications,
+      })
+    ).rejects.toThrow();
+
+    expect(notifications.triggers).toEqual([]);
+    expect(
+      db.select().from(coupons).where(eq(coupons.id, seats[0].id)).get()
+    ).toEqual(seats[0]);
+    expect(db.select().from(enrollments).all()).toEqual([]);
+  });
+
+  it("emits once when the successful claimant retries and a competing Student claims the same Seat", async () => {
+    const { seats, otherAdmin } = teamLicence();
+    const notifications = createFakeNotificationTransport();
+    const result = await submitSeatClaim(
+      db,
+      seats[0].code,
+      base.user.id,
+      "PL",
+      NOW,
+      { notifications }
+    );
+    if (!result.ok) throw new Error(result.error);
+    for (const claimantId of [base.user.id, otherAdmin.id]) {
+      expect(
+        await submitSeatClaim(db, seats[0].code, claimantId, "PL", NOW, {
+          notifications,
+        })
+      ).toEqual({
+        ok: false,
+        error: "Coupon has already been redeemed",
+      });
+    }
+
+    expect(notifications.triggers).toHaveLength(1);
+    expect(db.select().from(enrollments).all()).toEqual([result.enrollment]);
+    expect(
+      db.select().from(coupons).where(eq(coupons.id, seats[0].id)).get()
+    ).toEqual(result.seat);
+  });
+
+  it.each([
+    "unknown",
+    "Open Refund Request",
+    "refunded",
+    "already enrolled",
+    "country mismatch",
+  ])("does not notify for a rejected claim: %s", async (reason) => {
+    const { owner, seats } = teamLicence();
+    const notifications = createFakeNotificationTransport();
+    if (reason === "Open Refund Request") {
+      const request = raiseRefundRequest(
+        db,
+        seats[0].purchaseId,
+        owner.id,
+        "No longer needed.",
+        NOW
+      );
+      if (!request.ok) throw new Error(request.error);
+    }
+    if (reason === "already enrolled")
+      createIndividualPurchase(db, base.user.id, base.course.id, "PL", NOW);
+    const originalSeats = db.select().from(coupons).all();
+    const originalEnrollments = db.select().from(enrollments).all();
+    const result = await submitSeatClaim(
+      db,
+      reason === "unknown"
+        ? "UNKNOWN"
+        : reason === "refunded"
+          ? seats[3].code
+          : seats[0].code,
+      base.user.id,
+      reason === "country mismatch" ? "US" : "PL",
+      NOW,
+      { notifications }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(notifications.triggers).toEqual([]);
+    expect(db.select().from(coupons).all()).toEqual(originalSeats);
+    expect(db.select().from(enrollments).all()).toEqual(originalEnrollments);
+  });
+
+  it("preserves the complete claim and logs a failed delivery", async () => {
+    const { seats } = teamLicence();
+    const notifications = createFakeNotificationTransport();
+    notifications.failures.add("trigger");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await submitSeatClaim(
+        db,
+        seats[0].code,
+        base.user.id,
+        "PL",
+        NOW,
+        { notifications }
+      );
+
+      if (!result.ok) throw new Error(result.error);
+      expect(
+        db.select().from(coupons).where(eq(coupons.id, seats[0].id)).get()
+      ).toEqual(result.seat);
+      expect(db.select().from(enrollments).all()).toEqual([result.enrollment]);
+      expect(notifications.triggers).toHaveLength(1);
+      expect(notifications.deliveries).toEqual([]);
+      expect(log).toHaveBeenCalledWith(
+        `Notification delivery failed for seat-claimed:${seats[0].id}.`,
+        expect.any(Error)
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("keeps each remaining-Seat snapshot while later claims run and sends only the final claim event at zero", async () => {
+    const { seats, otherAdmin } = teamLicence();
+    const notifications = createFakeNotificationTransport();
+    let finishFirst: (() => void) | undefined;
+    const firstPending = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const first = submitSeatClaim(db, seats[0].code, base.user.id, "PL", NOW, {
+      notifications: {
+        ...notifications,
+        async trigger(event) {
+          await firstPending;
+          await notifications.trigger(event);
+        },
+      },
+    });
+    const second = await submitSeatClaim(
+      db,
+      seats[1].code,
+      otherAdmin.id,
+      "PL",
+      NOW,
+      { notifications }
+    );
+    const third = await submitSeatClaim(
+      db,
+      seats[2].code,
+      platformAdmin.id,
+      "PL",
+      NOW,
+      { notifications }
+    );
+    if (!finishFirst) throw new Error("First claim did not begin delivery");
+    finishFirst();
+    const firstResult = await first;
+
+    expect([firstResult.ok, second.ok, third.ok]).toEqual([true, true, true]);
+    expect(
+      notifications.deliveries.map((event) => ({
+        kind: event.kind,
+        seatId: event.recordId,
+        remainingSeats: event.data.snapshot.remainingSeats,
+      }))
+    ).toEqual([
+      { kind: "seat-claimed", seatId: seats[1].id, remainingSeats: 1 },
+      { kind: "seat-claimed", seatId: seats[2].id, remainingSeats: 0 },
+      { kind: "seat-claimed", seatId: seats[0].id, remainingSeats: 2 },
+    ]);
+    expect(notifications.deliveries[0].data.context).toBe(
+      "Test Course · 1 Seat remaining on your Team Licence"
+    );
+  });
+
+  it("respects a saved muted Seat claims preference without affecting the claim", async () => {
+    const { owner, seats } = teamLicence();
+    const notifications = createFakeNotificationTransport();
+    await notifications.initializePreferences(
+      owner.id,
+      defaultNotificationPreferences()
+    );
+    await notifications.setPreference(owner.id, {
+      category: "seatClaims",
+      channel: "feed",
+      enabled: false,
+    });
+
+    const result = await submitSeatClaim(
+      db,
+      seats[0].code,
+      base.user.id,
+      "PL",
+      NOW,
+      { notifications }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(notifications.triggers).toHaveLength(1);
+    expect(notifications.deliveries).toEqual([]);
+    expect(db.select().from(enrollments).all()).toHaveLength(1);
+  });
+
+  it("excludes the buyer's own claim while granting their Enrollment", async () => {
+    const { owner, seats } = teamLicence();
+    const notifications = createFakeNotificationTransport();
+    const result = await submitSeatClaim(
+      db,
+      seats[0].code,
+      owner.id,
+      "PL",
+      NOW,
+      { notifications }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(db.select().from(enrollments).all()).toEqual([
+      expect.objectContaining({ userId: owner.id }),
+    ]);
+    expect(notifications.triggers).toEqual([]);
+  });
+
+  it("notifies only the Team Licence buyer after the Seat and Enrollment commit with that licence's available count", async () => {
+    const { owner, purchase, seats } = teamLicence();
+    const seat = seats[0];
+    const notifications = createFakeNotificationTransport();
+    const observed: unknown[] = [];
+    const result = await submitSeatClaim(
+      db,
+      seat.code,
+      base.user.id,
+      "PL",
+      NOW,
+      {
+        notifications: {
+          ...notifications,
+          async trigger(event) {
+            observed.push({
+              inTransaction: db.$client.inTransaction,
+              seat: db
+                .select()
+                .from(coupons)
+                .where(eq(coupons.id, seat.id))
+                .get(),
+              enrollment: db.select().from(enrollments).get(),
+            });
+            await notifications.trigger(event);
+          },
+        },
+      }
+    );
+
+    if (!result.ok) throw new Error(result.error);
+    expect(observed).toEqual([
+      {
+        inTransaction: false,
+        seat: result.seat,
+        enrollment: result.enrollment,
+      },
+    ]);
+    expect(notifications.deliveries).toEqual([
+      {
+        kind: "seat-claimed",
+        recordId: seat.id,
+        idempotencyKey: `cadence:seat-claimed:${seat.id}`,
+        recipientIds: [owner.id],
+        actorId: base.user.id,
+        data: {
+          category: "seatClaims",
+          title: "Test User claimed a Seat",
+          context: "Test Course · 2 Seats remaining on your Team Licence",
+          destination: `/team#seat-${seat.id}`,
+          source: {
+            purchaseId: purchase.id,
+            seatId: seat.id,
+            courseId: base.course.id,
+          },
+          snapshot: {
+            claimantName: "Test User",
+            courseTitle: "Test Course",
+            remainingSeats: 2,
+          },
+        },
+      },
+    ]);
+  });
+});
 
 describe("returning after an Enrollment lapses", () => {
   it.each(["Individual Purchase", "Seat claim"])(
