@@ -10,6 +10,8 @@ import { Input } from "~/components/ui/input";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { db } from "~/db";
 import { eq } from "drizzle-orm";
+import { syncNotificationPerson } from "~/lib/notifications.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 
 const signupSchema = z.object({
   name: z.string().trim().min(1, "Name is required."),
@@ -38,7 +40,7 @@ export async function loader({ request, url }: Route.LoaderArgs) {
   return {};
 }
 
-export async function action({ request, url }: Route.ActionArgs) {
+export async function action({ request, url, context }: Route.ActionArgs) {
   const formData = await request.formData();
   const parsed = parseFormData(formData, signupSchema);
 
@@ -80,6 +82,7 @@ export async function action({ request, url }: Route.ActionArgs) {
     .returning()
     .get();
   const cookie = await setCurrentUserId(request, newUser.id);
+  await syncNotificationPerson(newUser, context.get(notificationTransportContext));
   throw redirect(destination, {
     headers: { "Set-Cookie": cookie },
   });

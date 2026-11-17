@@ -17,6 +17,9 @@ import { db } from "~/db";
 import { eq } from "drizzle-orm";
 import { formatPrice } from "~/lib/utils";
 import { listRefundRequestsForBuyer } from "~/lib/refunds.server";
+import { NotificationPreferencesCard } from "~/components/notification-preferences-card";
+import { syncNotificationPerson } from "~/lib/notifications.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 
 const settingsSchema = z.object({
   name: z.string().trim().min(1, "Name cannot be empty."),
@@ -63,7 +66,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   };
 }
 
-export async function action({ request }: Route.ActionArgs) {
+export async function action({ request, context }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -88,12 +91,14 @@ export async function action({ request }: Route.ActionArgs) {
 
   const { name, bio } = parsed.data;
 
-  db
+  const updated = db
     .update(users)
     .set({ name, email: currentUser.email, bio: bio || null })
     .where(eq(users.id, currentUser.id))
     .returning()
     .get();
+  if (!updated) throw data("User not found.", { status: 404 });
+  await syncNotificationPerson(updated, context.get(notificationTransportContext));
   return { success: true };
 }
 
@@ -187,6 +192,8 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
           </fetcher.Form>
         </CardContent>
       </Card>
+
+      <NotificationPreferencesCard key={user.id} personId={user.id} />
 
       {refundRequests.length > 0 && (
         <Card className="mt-8 max-w-md">

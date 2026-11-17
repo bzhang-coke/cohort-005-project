@@ -6,6 +6,7 @@ import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
 import { fileURLToPath } from "url";
 import * as schema from "../app/db/schema";
+import { backfillNotificationPeople } from "../app/lib/notifications.server";
 import {
   UserRole,
   CourseStatus,
@@ -2810,6 +2811,10 @@ This course is still in draft while the cluster examples are rewritten against t
   }
 
   console.log(`Created ${watchEventRows.length} video watch events.`);
+
+  // Identity/default sync only; never replay the seeded historical events.
+  const notifications = await backfillNotificationPeople(db);
+  console.log("Notification identity sync:", notifications);
 
   // ─── Summary ───
 
