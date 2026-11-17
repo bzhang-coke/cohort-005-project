@@ -61,10 +61,12 @@ async function postAs(
 }
 
 function callPurchaseAction(request: Request, slug = base.course.slug) {
+  const context = new RouterContextProvider();
+  context.set(notificationTransportContext, notifications);
   return purchaseAction({
     request,
     params: { slug },
-    context: new RouterContextProvider(),
+    context,
     url: new URL(request.url),
     pattern: "/courses/:slug/purchase",
   });
@@ -349,6 +351,33 @@ describe("Seat claim action", () => {
 });
 
 describe("Individual Purchase action", () => {
+  it("delivers a successful Enrollment through the injected fake even with configured runtime credentials", async () => {
+    notifications.preferences.set(base.instructor.id, {
+      enrollments: { channels: { feed: true } },
+    });
+
+    await expectRedirect(
+      callPurchaseAction(
+        await postAs(base.user.id, { intent: "confirm-purchase" })
+      ),
+      "/courses/test-course/welcome"
+    );
+
+    const enrollment = db.select().from(enrollments).get();
+    expect(enrollment).toMatchObject({
+      userId: base.user.id,
+      courseId: base.course.id,
+    });
+    expect(notifications.deliveries).toEqual([
+      expect.objectContaining({
+        kind: "enrollment-created",
+        recordId: enrollment?.id,
+        recipientIds: [base.instructor.id],
+        actorId: base.user.id,
+      }),
+    ]);
+  });
+
   it("still grants the requested Seats for a Team Licence without enrolling its buyer", async () => {
     await expectRedirect(
       callPurchaseAction(

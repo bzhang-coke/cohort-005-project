@@ -84,22 +84,15 @@ export type NotificationFeedState = NotificationPage & {
   pageLoading: boolean;
   pageError: string | null;
 };
-const emptyPage: NotificationPage = {
-  items: [],
-  unseen: 0,
-  unread: 0,
-  total: 0,
-  nextCursor: null,
-};
-
-// The controller is the public Cadence client seam used by the popover. It owns
-// only ephemeral view state; the remote service owns history and statuses.
-export function createNotificationFeedController(dependencies: {
-  credentials: () => Promise<NotificationIdentity>;
-  connect: NotificationFeedConnector;
-}) {
-  let state: NotificationFeedState = {
-    ...emptyPage,
+function freshFeedState(
+  overrides: Partial<NotificationFeedState> = {}
+): NotificationFeedState {
+  return {
+    items: [],
+    unseen: 0,
+    unread: 0,
+    total: 0,
+    nextCursor: null,
     personId: null,
     status: "idle",
     open: false,
@@ -108,7 +101,17 @@ export function createNotificationFeedController(dependencies: {
     busy: false,
     pageLoading: false,
     pageError: null,
+    ...overrides,
   };
+}
+
+// The controller is the public Cadence client seam used by the popover. It owns
+// only ephemeral view state; the remote service owns history and statuses.
+export function createNotificationFeedController(dependencies: {
+  credentials: () => Promise<NotificationIdentity>;
+  connect: NotificationFeedConnector;
+}) {
+  let state = freshFeedState();
   const listeners = new Set<() => void>();
   type Session = {
     personId: number;
@@ -116,6 +119,7 @@ export function createNotificationFeedController(dependencies: {
     unsubscribe?: () => void;
     pending?: Promise<void>;
     queued: boolean;
+    seenQueued: boolean;
     renewal?: Promise<LiveNotificationIdentity>;
     mutation?: Promise<boolean>;
   };
@@ -203,14 +207,17 @@ export function createNotificationFeedController(dependencies: {
   async function mutate(
     operation: (client: NotificationFeedClient) => Promise<void>,
     message: string,
-    current = session
+    current = session,
+    options: { preserveStatusError?: boolean; markingSeen?: boolean } = {}
   ): Promise<boolean> {
     if (!current?.client || current !== session) return false;
-    if (current.mutation) await current.mutation;
-    if (current !== session || !current.client) return false;
+    const previous = current.mutation;
     const client = current.client;
-    update({ busy: true, statusError: null });
+    update({ busy: true });
     const pending = (async () => {
+      if (previous) await previous;
+      if (current !== session) return false;
+      if (!options.preserveStatusError) update({ statusError: null });
       try {
         await operation(client);
         if (current !== session) return false;
@@ -220,24 +227,48 @@ export function createNotificationFeedController(dependencies: {
         // A rejected or still-processing write may have changed some remote
         // rows. Preserve the failure feedback and reconcile confirmed state.
         if (current === session) await refresh(current);
-        if (current === session)
+        if (current === session) {
+          // Invalidations during this failed seen operation must not turn
+          // reconciliation into an automatic retry of the write.
+          if (options.markingSeen) current.seenQueued = false;
           update({
             statusError:
               error instanceof NotificationStatusPending
                 ? error.message
                 : message,
           });
+        }
         return false;
-      } finally {
-        if (current === session) update({ busy: false });
       }
     })();
     current.mutation = pending;
     try {
       return await pending;
     } finally {
-      if (current.mutation === pending) current.mutation = undefined;
+      if (current.mutation === pending) {
+        current.mutation = undefined;
+        if (current.seenQueued) await reconcileSeen(current);
+        if (current === session && !current.mutation) update({ busy: false });
+      }
     }
+  }
+  async function markSeen(current = session, clearStatusError = true) {
+    await mutate(
+      async (client) => {
+        if (current !== session || !current || !state.open) return;
+        await client.markAllSeen();
+      },
+      "Notifications could not be marked seen. Close and reopen the feed to try again.",
+      current,
+      { preserveStatusError: !clearStatusError, markingSeen: true }
+    );
+  }
+  async function reconcileSeen(current: Session) {
+    if (current !== session) return;
+    current.seenQueued = state.open && state.unseen > 0;
+    if (!current.seenQueued || current.mutation) return;
+    current.seenQueued = false;
+    await markSeen(current, false);
   }
   async function loadMore() {
     const current = session;
@@ -286,11 +317,11 @@ export function createNotificationFeedController(dependencies: {
   }
   async function setOpen(open: boolean) {
     update({ open });
-    if (!open) return;
-    await mutate(
-      (client) => client.markAllSeen(),
-      "Notifications could not be marked seen. Close and reopen the feed to try again."
-    );
+    if (!open) {
+      if (session) session.seenQueued = false;
+      return;
+    }
+    await markSeen();
   }
   async function renew(current: Session): Promise<LiveNotificationIdentity> {
     if (current !== session) throw new Error("Notification session changed.");
@@ -306,15 +337,13 @@ export function createNotificationFeedController(dependencies: {
       } catch (error) {
         if (current === session) {
           teardown();
-          update({
-            ...emptyPage,
-            status: "error",
-            open: false,
-            busy: false,
-            pageLoading: false,
-            pageError: null,
-            error: "Notifications could not reconnect. Please try again.",
-          });
+          update(
+            freshFeedState({
+              personId: current.personId,
+              status: "error",
+              error: "Notifications could not reconnect. Please try again.",
+            })
+          );
         }
         throw error;
       }
@@ -335,19 +364,14 @@ export function createNotificationFeedController(dependencies: {
     },
     async setPerson(personId: number | null) {
       teardown();
-      update({
-        ...emptyPage,
-        personId,
-        status: personId === null ? "idle" : "loading",
-        open: false,
-        error: null,
-        statusError: null,
-        busy: false,
-        pageLoading: false,
-        pageError: null,
-      });
+      update(
+        freshFeedState({
+          personId,
+          status: personId === null ? "idle" : "loading",
+        })
+      );
       if (personId === null) return;
-      const current: Session = { personId, queued: false };
+      const current: Session = { personId, queued: false, seenQueued: false };
       session = current;
       try {
         const identity = await dependencies.credentials();
@@ -372,15 +396,7 @@ export function createNotificationFeedController(dependencies: {
             update({ status: "error", error: event.message });
             return;
           }
-          void refresh(current).then(async () => {
-            if (
-              current === session &&
-              state.open &&
-              state.unseen > 0 &&
-              !current.mutation
-            )
-              await setOpen(true);
-          });
+          void refresh(current).then(() => reconcileSeen(current));
         });
         await refresh(current);
         if (current === session && state.open) await setOpen(true);
@@ -414,17 +430,7 @@ export function createNotificationFeedController(dependencies: {
     },
     dispose() {
       teardown();
-      update({
-        ...emptyPage,
-        personId: null,
-        status: "idle",
-        open: false,
-        error: null,
-        statusError: null,
-        busy: false,
-        pageLoading: false,
-        pageError: null,
-      });
+      update(freshFeedState());
     },
   };
 }

@@ -633,12 +633,199 @@ it("updates live while closed and open, and keeps read state distinct from seen"
     nextCursor: null,
   });
   await feed.refresh();
-  await feed.setOpen(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
   expect(feed.getSnapshot()).toMatchObject({
     unseen: 0,
     unread: 2,
     open: true,
   });
+  feed.dispose();
+});
+
+it.each([false, true])(
+  "marks live arrivals seen after a pending read finishes while preserving its feedback (read fails: %s)",
+  async (readFails) => {
+    const client = createFakeNotificationFeedClient([row]);
+    const feed = feedFor(client);
+    await feed.setPerson(7);
+    await feed.setOpen(true);
+    const markRead = client.markRead;
+    if (readFails) client.failures.add("read");
+    let release: (() => void) | undefined;
+    client.markRead = async (id) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await markRead(id);
+    };
+    const reading = feed.markRead(row.id);
+    client.receive({
+      items: [
+        { ...row, id: "arrival" },
+        { ...row, seen: true },
+      ],
+      unseen: 1,
+      unread: 2,
+      total: 2,
+      nextCursor: null,
+    });
+    await feed.refresh();
+    expect(feed.getSnapshot()).toMatchObject({
+      open: true,
+      busy: true,
+      unseen: 1,
+    });
+
+    release?.();
+    expect(await reading).toBe(!readFails);
+
+    expect(feed.getSnapshot()).toMatchObject({
+      open: true,
+      busy: false,
+      unseen: 0,
+      unread: readFails ? 2 : 1,
+      statusError: readFails
+        ? "Notification could not be marked read. Please try again."
+        : null,
+    });
+    expect(feed.getSnapshot().items).toEqual([
+      expect.objectContaining({ id: "arrival", seen: true, read: false }),
+      expect.objectContaining({ id: row.id, seen: true, read: !readFails }),
+    ]);
+    feed.dispose();
+  }
+);
+
+it("keeps later status changes pending until earlier requested changes finish", async () => {
+  const client = createFakeNotificationFeedClient([
+    { ...row, id: "first" },
+    { ...row, id: "second" },
+    { ...row, id: "third" },
+  ]);
+  const feed = feedFor(client);
+  await feed.setPerson(7);
+  const markRead = client.markRead;
+  let releaseFirst: (() => void) | undefined;
+  let releaseSecond: (() => void) | undefined;
+  client.markRead = async (id) => {
+    await new Promise<void>((resolve) => {
+      if (id === "first") releaseFirst = resolve;
+      else releaseSecond = resolve;
+    });
+    if (id === "second") throw new Error("Read unavailable.");
+    await markRead(id);
+  };
+  const first = feed.markRead("first");
+  const second = feed.markRead("second");
+  const all = feed.markAllRead();
+
+  releaseFirst?.();
+  await first;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(feed.getSnapshot()).toMatchObject({ unread: 2, busy: true });
+  releaseSecond?.();
+  expect(await second).toBe(false);
+  expect(await all).toBe(true);
+  expect(feed.getSnapshot()).toMatchObject({
+    unread: 0,
+    busy: false,
+    statusError: null,
+  });
+  feed.dispose();
+});
+
+it.each(["close", "dispose", "switch"])(
+  "discards queued seen reconciliation after %s",
+  async (change) => {
+    const first = createFakeNotificationFeedClient([row]);
+    const second = createFakeNotificationFeedClient([
+      { ...row, id: "other-person" },
+    ]);
+    let personId = 7;
+    const feed = createNotificationFeedController({
+      credentials: async () => ({
+        mode: "live",
+        personId,
+        publicApiKey: "public",
+        feedChannelId: "feed",
+        userToken: "signed",
+        expiresAt: 9999999999999,
+      }),
+      connect: () => (personId === 7 ? first : second),
+    });
+    await feed.setPerson(7);
+    await feed.setOpen(true);
+    let release: (() => void) | undefined;
+    first.markRead = () =>
+      new Promise((resolve) => {
+        release = resolve;
+      });
+    const reading = feed.markRead(row.id);
+    first.receive({
+      items: [
+        { ...row, id: "arrival" },
+        { ...row, seen: true },
+      ],
+      unseen: 1,
+      unread: 2,
+      total: 2,
+      nextCursor: null,
+    });
+    await feed.refresh();
+    if (change === "close") await feed.setOpen(false);
+    else if (change === "dispose") feed.dispose();
+    else {
+      personId = 8;
+      await feed.setPerson(8);
+    }
+    const expected = feed.getSnapshot();
+    release?.();
+    await reading;
+
+    expect(await first.list()).toMatchObject({ unseen: 1 });
+    expect(feed.getSnapshot()).toEqual({ ...expected, busy: false });
+    feed.dispose();
+  }
+);
+
+it("leaves failed queued seen reconciliation for another action or live event", async () => {
+  const client = createFakeNotificationFeedClient([row]);
+  const feed = feedFor(client);
+  await feed.setPerson(7);
+  await feed.setOpen(true);
+  let release: (() => void) | undefined;
+  client.markRead = () =>
+    new Promise((resolve) => {
+      release = resolve;
+    });
+  const reading = feed.markRead(row.id);
+  client.receive({
+    items: [
+      { ...row, id: "arrival" },
+      { ...row, seen: true },
+    ],
+    unseen: 1,
+    unread: 2,
+    total: 2,
+    nextCursor: null,
+  });
+  await feed.refresh();
+  let attempts = 0;
+  client.markAllSeen = async () => {
+    attempts++;
+    if (attempts === 1) client.receive(await client.list());
+    throw new Error("Seen unavailable.");
+  };
+  release?.();
+  await reading;
+
+  expect(attempts).toBe(1);
+  expect(feed.getSnapshot()).toMatchObject({
+    open: true,
+    busy: false,
+    unseen: 1,
+  });
+  expect(feed.getSnapshot().statusError).toContain("could not be marked seen");
   feed.dispose();
 });
 
@@ -688,7 +875,7 @@ it("uses an empty keyless feed without creating a vendor client", async () => {
   feed.dispose();
 });
 
-it("renews once for overlapping requests and clears the feed when the renewed session is another person", async () => {
+it("renews once for overlapping requests and clears the feed and stale feedback when the renewed session is another person", async () => {
   let renew:
     | (() => Promise<
         import("./notification-feed-client").LiveNotificationIdentity
@@ -708,7 +895,11 @@ it("renews once for overlapping requests and clears the feed when the renewed se
     expiresAt: 9999999999999,
   };
   let reads = 0;
-  const client = createFakeNotificationFeedClient([row]);
+  const client = createFakeNotificationFeedClient(
+    [row, { ...row, id: "older" }],
+    undefined,
+    1
+  );
   const feed = createNotificationFeedController({
     credentials: async () => {
       reads++;
@@ -731,6 +922,16 @@ it("renews once for overlapping requests and clears the feed when the renewed se
   release?.({ ...identity, userToken: "renewed" });
   expect((await first).userToken).toBe("renewed");
   expect((await second).userToken).toBe("renewed");
+  client.failures.add("read");
+  await feed.markRead(row.id);
+  client.failures.add("list");
+  await feed.loadMore();
+  await feed.refresh();
+  expect(feed.getSnapshot()).toMatchObject({
+    statusError: expect.stringContaining("could not be marked read"),
+    pageError: expect.stringContaining("could not load"),
+    error: expect.stringContaining("could not load"),
+  });
   const changed = renew();
   release?.({ ...identity, personId: 8 });
   await expect(changed).rejects.toThrow("session changed");
@@ -739,6 +940,12 @@ it("renews once for overlapping requests and clears the feed when the renewed se
     items: [],
     unseen: 0,
     status: "error",
+    statusError: null,
+    pageError: null,
+    error: "Notifications could not reconnect. Please try again.",
+    busy: false,
+    pageLoading: false,
+    open: false,
   });
   feed.dispose();
 });
