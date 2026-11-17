@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useFetcher } from "react-router";
+import { Link, useFetcher, useLocation } from "react-router";
 import { toast } from "sonner";
 import type { Route } from "./+types/team";
 import { getCurrentUserId } from "~/lib/session";
@@ -199,6 +199,23 @@ function CopyButton({ code }: { code: string }) {
 export default function Team({ loaderData }: Route.ComponentProps) {
   const { courseStats, couponRows, teamLicences } = loaderData;
   const [courseFilter, setCourseFilter] = useState<number | "all">("all");
+  const location = useLocation();
+
+  useEffect(() => {
+    if (couponRows.some((seat) => location.hash === `#seat-${seat.id}`)) {
+      setCourseFilter("all");
+    }
+  }, [location.key, location.hash, couponRows]);
+
+  useEffect(() => {
+    // Run again after revealing a filtered Seat, including navigation to the
+    // same hash while this page is already open. Only loaded Team Seats qualify.
+    const seat = couponRows.find((row) => location.hash === `#seat-${row.id}`);
+    if (seat)
+      document
+        .getElementById(`seat-${seat.id}`)
+        ?.scrollIntoView({ block: "center" });
+  }, [location.key, location.hash, couponRows, courseFilter]);
 
   const filteredCoupons =
     courseFilter === "all"
@@ -276,6 +293,7 @@ export default function Team({ loaderData }: Route.ComponentProps) {
           <h2 className="text-lg font-semibold">Coupons</h2>
           {courseStats.length > 1 && (
             <select
+              aria-label="Filter Seats by course"
               value={courseFilter}
               onChange={(e) =>
                 setCourseFilter(
@@ -309,7 +327,11 @@ export default function Team({ loaderData }: Route.ComponentProps) {
               </thead>
               <tbody>
                 {filteredCoupons.map((coupon) => (
-                  <tr key={coupon.id} className="border-b last:border-0">
+                  <tr
+                    key={coupon.id}
+                    id={`seat-${coupon.id}`}
+                    className="scroll-mt-6 border-b last:border-0"
+                  >
                     <td className="px-4 py-3">
                       <code className="rounded bg-muted px-2 py-0.5 text-xs">
                         {coupon.code}

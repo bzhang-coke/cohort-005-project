@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, count } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import type * as schema from "~/db/schema";
 import { coupons, courses, enrollments, purchases, users } from "~/db/schema";
@@ -203,4 +203,79 @@ export function claimSeat(
 
     return { ok: true, seat: claimedSeat, enrollment };
   });
+}
+
+export async function submitSeatClaim(
+  db: Db,
+  code: string,
+  userId: number,
+  country: string | null,
+  now: Date = new Date(),
+  dependencies: { notifications?: NotificationTransport } = {}
+): Promise<SeatClaimResult> {
+  const result = claimSeat(db, code, userId, country, now);
+  if (!result.ok) return result;
+
+  try {
+    const details = db
+      .select({
+        buyerId: purchases.userId,
+        courseTitle: courses.title,
+        claimantName: users.name,
+      })
+      .from(purchases)
+      .innerJoin(courses, eq(courses.id, result.seat.courseId))
+      .innerJoin(users, eq(users.id, userId))
+      .where(eq(purchases.id, result.seat.purchaseId))
+      .get();
+    if (!details) throw new Error("Seat claim Notification context not found");
+
+    // A successful claim rules out an Open Refund Request on this Purchase.
+    // Capture its remaining available Seats before the first external await.
+    const remainingSeats =
+      db
+        .select({ value: count() })
+        .from(coupons)
+        .where(
+          and(
+            eq(coupons.purchaseId, result.seat.purchaseId),
+            isNull(coupons.redeemedByUserId),
+            isNull(coupons.refundedAt)
+          )
+        )
+        .get()?.value ?? 0;
+
+    await deliverNotification(
+      {
+        kind: "seat-claimed",
+        recordId: result.seat.id,
+        recipientIds: [details.buyerId],
+        actorId: userId,
+        data: {
+          category: "seatClaims",
+          title: `${details.claimantName} claimed a Seat`,
+          context: `${details.courseTitle} · ${remainingSeats} ${remainingSeats === 1 ? "Seat" : "Seats"} remaining on your Team Licence`,
+          destination: `/team#seat-${result.seat.id}`,
+          source: {
+            purchaseId: result.seat.purchaseId,
+            seatId: result.seat.id,
+            courseId: result.seat.courseId,
+          },
+          snapshot: {
+            claimantName: details.claimantName,
+            courseTitle: details.courseTitle,
+            remainingSeats,
+          },
+        },
+      },
+      dependencies.notifications
+    );
+  } catch (error) {
+    console.error(
+      `Seat claim Notification failed for Seat ${result.seat.id}.`,
+      error
+    );
+  }
+
+  return result;
 }

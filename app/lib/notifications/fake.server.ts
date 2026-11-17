@@ -1,6 +1,7 @@
 import {
   defaultNotificationFeedPreference,
   type NotificationDelivery,
+  type CommentNotificationArchive,
   type NotificationPreferences,
 } from "../notifications";
 import type {
@@ -13,12 +14,15 @@ export function createFakeNotificationTransport() {
   const preferences = new Map<number, NotificationPreferences>();
   const triggers: NotificationDelivery[] = [];
   const deliveries: NotificationDelivery[] = [];
+  const archives: CommentNotificationArchive[] = [];
+  const archived = new Set<string>();
   const failures = new Set<
     | "identify"
     | "getPreferences"
     | "initializePreferences"
     | "setPreference"
     | "trigger"
+    | "archiveComment"
   >();
   function checkFailure(
     operation:
@@ -27,6 +31,7 @@ export function createFakeNotificationTransport() {
       | "initializePreferences"
       | "setPreference"
       | "trigger"
+      | "archiveComment"
   ) {
     if (failures.has(operation))
       throw new Error(`Simulated Notification ${operation} failure.`);
@@ -43,6 +48,18 @@ export function createFakeNotificationTransport() {
       );
       if (recipientIds.length)
         deliveries.push(structuredClone({ ...event, recipientIds }));
+    },
+    async archiveComment(source) {
+      archives.push(structuredClone(source));
+      checkFailure("archiveComment");
+      for (const event of deliveries) {
+        if (
+          event.data.source.commentId === source.commentId &&
+          (event.kind === "discussion-question-created" ||
+            event.kind === "discussion-reply-created")
+        )
+          archived.add(event.idempotencyKey);
+      }
     },
     async identify(person) {
       checkFailure("identify");
@@ -77,11 +94,17 @@ export function createFakeNotificationTransport() {
       return structuredClone(updated);
     },
   };
-  return Object.assign(transport, {
+  return {
+    ...transport,
     people,
     preferences,
     failures,
     triggers,
     deliveries,
-  });
+    archives,
+    archived,
+    get activeDeliveries() {
+      return deliveries.filter((event) => !archived.has(event.idempotencyKey));
+    },
+  };
 }

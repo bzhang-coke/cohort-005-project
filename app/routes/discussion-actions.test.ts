@@ -184,6 +184,9 @@ describe("Discussion Notification destinations", () => {
     expect(afterDeletion).toContain(`id="comment-${reply.id}"`);
     expect(afterDeletion).toContain("The surviving answer.");
     expect(afterDeletion).not.toContain("My question.");
+    expect(
+      notifications.activeDeliveries.map((event) => event.recordId)
+    ).toEqual([reply.id]);
   });
 
   it.each(["signed out", "lapsed", "country blocked"])(
@@ -454,11 +457,15 @@ describe("lesson discussion action", () => {
           error: "You can only delete your own comments",
         });
         expect(db.select().from(comments).all()).toEqual([question, reply]);
+        expect(notifications.archives).toEqual([]);
       } else {
         expect(result).toEqual({ ok: true });
         expect(db.select().from(comments).all()).toEqual([
           { ...question, deletedAt: expect.any(String) },
           reply,
+        ]);
+        expect(notifications.archives).toEqual([
+          expect.objectContaining({ commentId: question.id }),
         ]);
       }
     }
@@ -522,8 +529,108 @@ describe("lesson discussion action", () => {
       });
       expect(db.select().from(comments).all()).toEqual([otherComment]);
       expect(notifications.triggers).toEqual([]);
+      expect(notifications.archives).toEqual([]);
     }
   );
+
+  it.each(["signed out", "lapsed", "country blocked"])(
+    "rejects deletion and does not archive when the author is %s",
+    async (access) => {
+      await callLessonAction(
+        await postAs(base.user.id, {
+          intent: "create-comment",
+          body: "My question.",
+        })
+      );
+      const question = db.select().from(comments).get();
+      if (!question) throw new Error("Discussion Question was not saved");
+      if (access === "lapsed") {
+        db.delete(enrollments)
+          .where(eq(enrollments.userId, base.user.id))
+          .run();
+      } else if (access === "country blocked") {
+        db.update(courses)
+          .set({ price: 10000, pppEnabled: true })
+          .where(eq(courses.id, base.course.id))
+          .run();
+        db.insert(purchases)
+          .values({
+            userId: base.user.id,
+            courseId: base.course.id,
+            amountPaid: 2500,
+            country: "IN",
+          })
+          .run();
+      }
+      const request = await postAs(
+        access === "signed out" ? null : base.user.id,
+        {
+          intent: "delete-comment",
+          commentId: String(question.id),
+        }
+      );
+      request.headers.set("CF-IPCountry", "US");
+
+      await expect(callLessonAction(request)).rejects.toMatchObject({
+        init: { status: access === "signed out" ? 401 : 403 },
+      });
+      expect(notifications.archives).toEqual([]);
+      expect(db.select().from(comments).get()).toEqual(question);
+    }
+  );
+
+  it("keeps the deletion action successful after an archive failure and safely repeats it", async () => {
+    await callLessonAction(
+      await postAs(base.user.id, {
+        intent: "create-comment",
+        body: "My question.",
+      })
+    );
+    const question = db.select().from(comments).get();
+    if (!question) throw new Error("Discussion Question was not saved");
+    await callInstructorAction(
+      await postAs(base.instructor.id, {
+        intent: "reply",
+        commentId: String(question.id),
+        body: "My answer.",
+      })
+    );
+    const reply = db.select().from(comments).all()[1];
+    if (!reply) throw new Error("Discussion Reply was not saved");
+    notifications.failures.add("archiveComment");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(
+      await callLessonAction(
+        await postAs(base.instructor.id, {
+          intent: "delete-comment",
+          commentId: String(reply.id),
+        })
+      )
+    ).toEqual({ ok: true });
+    const deleted = db
+      .select()
+      .from(comments)
+      .where(eq(comments.id, reply.id))
+      .get();
+    expect(deleted?.deletedAt).toEqual(expect.any(String));
+    notifications.failures.clear();
+    expect(
+      await callLessonAction(
+        await postAs(base.instructor.id, {
+          intent: "delete-comment",
+          commentId: String(reply.id),
+        })
+      )
+    ).toEqual({ ok: true });
+    expect(
+      db.select().from(comments).where(eq(comments.id, reply.id)).get()
+    ).toEqual(deleted);
+    expect(
+      notifications.activeDeliveries.map((event) => event.recordId)
+    ).toEqual([question.id]);
+    expect(notifications.triggers).toHaveLength(2);
+  });
 
   it("preserves the missing-lesson creation response", async () => {
     const request = await postAs(base.user.id, {

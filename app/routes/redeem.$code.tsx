@@ -7,7 +7,12 @@ import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
 import { parseParams, parseFormData } from "~/lib/validation";
 import { getSeatAvailability } from "~/lib/refunds.server";
-import { claimSeat, SEAT_ON_HOLD, SEAT_REFUNDED } from "~/lib/enrollments.server";
+import {
+  submitSeatClaim,
+  SEAT_ON_HOLD,
+  SEAT_REFUNDED,
+} from "~/lib/enrollments.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 import { Card, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Ticket, AlertCircle, CheckCircle2, Globe } from "lucide-react";
@@ -106,7 +111,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   };
 }
 
-export async function action({ params, request }: Route.ActionArgs) {
+export async function action({ params, request, context }: Route.ActionArgs) {
   const { code } = parseParams(params, redeemParamsSchema);
 
   const currentUserId = await getCurrentUserId(request);
@@ -122,7 +127,16 @@ export async function action({ params, request }: Route.ActionArgs) {
   }
 
   const userCountry = await resolveCountry(request);
-  const result = claimSeat(db, code, currentUserId, userCountry);
+  const result = await submitSeatClaim(
+    db,
+    code,
+    currentUserId,
+    userCountry,
+    new Date(),
+    {
+      notifications: context.get(notificationTransportContext) ?? undefined,
+    }
+  );
 
   if (!result.ok) {
     return data({ error: result.error }, { status: 400 });

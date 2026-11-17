@@ -34,6 +34,52 @@ function feedFor(client: NotificationFeedClient) {
   });
 }
 
+it("reconciles an archived Discussion Question on explicit refresh, preserving the surviving read Discussion Reply and its destination", async () => {
+  const question = {
+    ...row,
+    id: "question",
+    category: "discussionQuestions" as const,
+    destination: "/courses/course/lessons/1#comment-45",
+  };
+  const reply = {
+    ...row,
+    id: "reply",
+    category: "discussionReplies" as const,
+    title: "An original answer",
+    context: "Lesson · Original snapshot",
+    destination: "/courses/course/lessons/1#comment-46",
+    createdAt: "2020-01-01T12:00:00Z",
+    read: true,
+    seen: true,
+  };
+  const client = createFakeNotificationFeedClient([question, reply]);
+  const feed = feedFor(client);
+  await feed.setPerson(7);
+  expect(feed.getSnapshot()).toMatchObject({ total: 2, unread: 1, unseen: 1 });
+  // The server archived a source while no live event was delivered. Focus,
+  // deletion completion, or opening the feed uses this same refresh boundary.
+  client.list = async () => ({
+    items: [reply],
+    nextCursor: null,
+    total: 1,
+    unread: 0,
+    unseen: 0,
+  });
+
+  await feed.refresh();
+
+  expect(feed.getSnapshot()).toMatchObject({
+    items: [reply],
+    total: 1,
+    unread: 0,
+    unseen: 0,
+  });
+  expect(await feed.activate("reply")).toBe(
+    "/courses/course/lessons/1#comment-46"
+  );
+  feed.dispose();
+});
+
 it("stops pagination with recoverable feedback if the history cursor does not advance", async () => {
   const client = createFakeNotificationFeedClient(
     [
@@ -772,28 +818,48 @@ it("keeps an in-flight refresh queued when another live event arrives", async ()
   feed.dispose();
 });
 
-it("activates exact destinations and marks rows read without navigating when only their checkmark is used", async () => {
-  const client = createFakeNotificationFeedClient([
-    { ...row, destination: "/courses/typescript/lessons/4#comment-12" },
-  ]);
-  const feed = createNotificationFeedController({
-    credentials: async () => ({
-      mode: "live",
-      personId: 7,
-      publicApiKey: "public",
-      feedChannelId: "feed",
-      userToken: "signed",
-      expiresAt: 9999999999999,
-    }),
-    connect: () => client,
-  });
-  await feed.setPerson(7);
-  await feed.setOpen(true);
-  await feed.markRead(row.id);
-  expect(feed.getSnapshot().open).toBe(true);
-  expect(await feed.activate(row.id)).toBe(
-    "/courses/typescript/lessons/4#comment-12"
-  );
-  expect(feed.getSnapshot().open).toBe(false);
-  feed.dispose();
-});
+it.each([
+  {
+    category: "discussionQuestions" as const,
+    destination: "/courses/typescript/lessons/4#comment-12",
+  },
+  { category: "seatClaims" as const, destination: "/team#seat-12" },
+])(
+  "activates $category destinations and marks rows read without navigating when only their checkmark is used",
+  async ({ category, destination }) => {
+    const client = createFakeNotificationFeedClient([
+      {
+        ...row,
+        category,
+        destination,
+        actor: {
+          name: "Test Student",
+          avatarUrl: "/student-avatar.png",
+        },
+      },
+    ]);
+    const feed = createNotificationFeedController({
+      credentials: async () => ({
+        mode: "live",
+        personId: 7,
+        publicApiKey: "public",
+        feedChannelId: "feed",
+        userToken: "signed",
+        expiresAt: 9999999999999,
+      }),
+      connect: () => client,
+    });
+    await feed.setPerson(7);
+    await feed.setOpen(true);
+    await feed.markRead(row.id);
+    expect(feed.getSnapshot().open).toBe(true);
+    expect(feed.getSnapshot().items[0]).toMatchObject({
+      read: true,
+      category,
+      actor: { avatarUrl: "/student-avatar.png" },
+    });
+    expect(await feed.activate(row.id)).toBe(destination);
+    expect(feed.getSnapshot().open).toBe(false);
+    feed.dispose();
+  }
+);

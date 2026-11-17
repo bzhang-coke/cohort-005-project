@@ -10,8 +10,12 @@ import {
   teamMembers,
   TeamMemberRole,
   teams,
+  users,
+  UserRole,
 } from "~/db/schema";
 import { setCurrentUserId } from "~/lib/session";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
+import { createFakeNotificationTransport } from "~/lib/notifications/fake.server";
 import { action as purchaseAction } from "./courses.$slug.purchase";
 import { action as seatAction } from "./redeem.$code";
 
@@ -25,10 +29,12 @@ vi.mock("~/db", () => ({
 
 let db: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
+let notifications: ReturnType<typeof createFakeNotificationTransport>;
 
 beforeEach(() => {
   db = createTestDb();
   base = seedBaseData(db);
+  notifications = createFakeNotificationTransport();
   db.update(courses)
     .set({ price: 7999, pppEnabled: true })
     .where(eq(courses.id, base.course.id))
@@ -65,10 +71,12 @@ function callPurchaseAction(request: Request, slug = base.course.slug) {
 }
 
 function callSeatAction(request: Request, code: string) {
+  const context = new RouterContextProvider();
+  context.set(notificationTransportContext, notifications);
   return seatAction({
     request,
     params: { code },
-    context: new RouterContextProvider(),
+    context,
     url: new URL(request.url),
     pattern: "/redeem/:code",
   });
@@ -126,6 +134,7 @@ describe("Enrollment action authorization", () => {
       expect(db.select().from(purchases).all()).toEqual(originalPurchases);
       expect(db.select().from(coupons).all()).toEqual([seat]);
       expect(db.select().from(enrollments).all()).toEqual([]);
+      expect(notifications.triggers).toEqual([]);
     }
   );
 
@@ -152,11 +161,37 @@ describe("Enrollment action authorization", () => {
       expect(db.select().from(purchases).all()).toEqual(originalPurchases);
       expect(db.select().from(coupons).all()).toEqual([seat]);
       expect(db.select().from(enrollments).all()).toEqual([]);
+      expect(notifications.triggers).toEqual([]);
     }
   );
 });
 
 describe("Seat claim action", () => {
+  it("redirects to welcome with the complete claim saved when Notification delivery fails", async () => {
+    const seat = unclaimedSeat();
+    notifications.failures.add("trigger");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expectRedirect(
+        callSeatAction(
+          await postAs(base.user.id, { intent: "confirm-redeem" }),
+          seat.code
+        ),
+        "/courses/test-course/welcome"
+      );
+      expect(
+        db.select().from(coupons).where(eq(coupons.id, seat.id)).get()
+      ).toMatchObject({ redeemedByUserId: base.user.id });
+      expect(db.select().from(enrollments).all()).toEqual([
+        expect.objectContaining({ userId: base.user.id }),
+      ]);
+      expect(notifications.triggers).toHaveLength(1);
+      expect(notifications.deliveries).toEqual([]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("returns the existing unavailable-Seat response after a refund", async () => {
     const seat = unclaimedSeat();
     const refundedAt = "2026-11-17T12:00:00.000Z";
@@ -176,6 +211,7 @@ describe("Seat claim action", () => {
     });
     expect(db.select().from(coupons).all()).toEqual([{ ...seat, refundedAt }]);
     expect(db.select().from(enrollments).all()).toEqual([]);
+    expect(notifications.triggers).toEqual([]);
   });
 
   it("preserves the country restriction error and leaves the Seat Unclaimed", async () => {
@@ -195,13 +231,23 @@ describe("Seat claim action", () => {
     });
     expect(db.select().from(coupons).all()).toEqual([seat]);
     expect(db.select().from(enrollments).all()).toEqual([]);
+    expect(notifications.triggers).toEqual([]);
   });
 
   it("allows only one successful claim when two signed-in people submit the same Seat together", async () => {
     const seat = unclaimedSeat();
+    const competitor = db
+      .insert(users)
+      .values({
+        name: "Second Student",
+        email: "second@example.com",
+        role: UserRole.Student,
+      })
+      .returning()
+      .get();
     const requests = await Promise.all([
       postAs(base.user.id, { intent: "confirm-redeem" }),
-      postAs(base.instructor.id, { intent: "confirm-redeem" }),
+      postAs(competitor.id, { intent: "confirm-redeem" }),
     ]);
 
     const results = await Promise.allSettled(
@@ -230,6 +276,13 @@ describe("Seat claim action", () => {
     expect(db.select().from(coupons).all()).toEqual([
       expect.objectContaining({ redeemedByUserId: enrollment.userId }),
     ]);
+    expect(notifications.triggers).toEqual([
+      expect.objectContaining({
+        kind: "seat-claimed",
+        recipientIds: [base.instructor.id],
+        actorId: enrollment.userId,
+      }),
+    ]);
   });
 
   it("redirects a successful claimant to welcome and preserves the existing error response on a repeated claim", async () => {
@@ -256,6 +309,14 @@ describe("Seat claim action", () => {
         courseId: base.course.id,
       }),
     ]);
+    expect(notifications.deliveries).toEqual([
+      expect.objectContaining({
+        kind: "seat-claimed",
+        recipientIds: [base.instructor.id],
+        actorId: base.user.id,
+        data: expect.objectContaining({ destination: `/team#seat-${seat.id}` }),
+      }),
+    ]);
 
     expect(
       await callSeatAction(
@@ -267,6 +328,7 @@ describe("Seat claim action", () => {
       init: { status: 400 },
     });
     expect(db.select().from(enrollments).all()).toEqual(savedEnrollments);
+    expect(notifications.triggers).toHaveLength(1);
   });
 
   it("leaves the Seat Unclaimed when the Enrollment cannot be saved", async () => {
@@ -282,6 +344,7 @@ describe("Seat claim action", () => {
     );
     expect(db.select().from(coupons).all()).toEqual([seat]);
     expect(db.select().from(enrollments).all()).toEqual([]);
+    expect(notifications.triggers).toEqual([]);
   });
 });
 

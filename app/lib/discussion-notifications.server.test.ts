@@ -10,7 +10,12 @@ import {
   UserRole,
   CourseStatus,
 } from "~/db/schema";
-import { createComment, submitComment, updateComment } from "./comments.server";
+import {
+  createComment,
+  submitComment,
+  submitCommentDeletion,
+  updateComment,
+} from "./comments.server";
 import { createFakeNotificationTransport } from "./notifications/fake.server";
 import { syncNotificationPerson } from "./notifications.server";
 
@@ -47,6 +52,217 @@ beforeEach(() => {
 afterEach(() => {
   db.$client.close();
   vi.restoreAllMocks();
+});
+
+describe("Discussion Notification archival", () => {
+  it("archives only the deleted Discussion Question after commit, retaining its surviving Discussion Reply", async () => {
+    const question = await submitComment(
+      db,
+      base.user.id,
+      lesson.id,
+      null,
+      "My question.",
+      NOW,
+      { notifications }
+    );
+    const reply = await submitComment(
+      db,
+      base.instructor.id,
+      lesson.id,
+      question.id,
+      "A surviving answer.",
+      NOW,
+      { notifications }
+    );
+    const archive = notifications.archiveComment;
+    notifications.archiveComment = async (source) => {
+      expect(db.$client.inTransaction).toBe(false);
+      expect(
+        db.select().from(comments).where(eq(comments.id, question.id)).get()
+      ).toMatchObject({ deletedAt: NOW.toISOString() });
+      await archive(source);
+    };
+
+    const deleted = await submitCommentDeletion(
+      db,
+      question.id,
+      base.user.id,
+      false,
+      NOW,
+      { notifications }
+    );
+
+    expect(deleted.deletedAt).toBe(NOW.toISOString());
+    expect(
+      notifications.activeDeliveries.map((event) => event.recordId)
+    ).toEqual([reply.id]);
+    expect(notifications.deliveries).toHaveLength(2);
+    expect(notifications.triggers).toHaveLength(2);
+    expect(
+      db.select().from(comments).where(eq(comments.id, reply.id)).get()
+    ).toEqual(reply);
+  });
+
+  it("repeatedly deleting a Discussion Reply archives only that reply and preserves its original snapshot", async () => {
+    const question = await submitComment(
+      db,
+      base.user.id,
+      lesson.id,
+      null,
+      "My question.",
+      NOW,
+      { notifications }
+    );
+    const reply = await submitComment(
+      db,
+      base.instructor.id,
+      lesson.id,
+      question.id,
+      "Original answer.",
+      NOW,
+      { notifications }
+    );
+    const history = structuredClone(notifications.deliveries);
+    updateComment(db, reply.id, base.instructor.id, "Edited answer.", NOW);
+
+    const deleted = await submitCommentDeletion(
+      db,
+      reply.id,
+      base.instructor.id,
+      true,
+      NOW,
+      { notifications }
+    );
+    const repeated = await submitCommentDeletion(
+      db,
+      reply.id,
+      base.instructor.id,
+      true,
+      new Date("2026-11-18T12:00:00.000Z"),
+      { notifications }
+    );
+
+    expect(repeated).toEqual(deleted);
+    expect(
+      notifications.activeDeliveries.map((event) => event.recordId)
+    ).toEqual([question.id]);
+    expect(notifications.deliveries).toEqual(history);
+    expect(notifications.triggers).toHaveLength(2);
+    expect(
+      db.select().from(comments).where(eq(comments.id, question.id)).get()
+    ).toEqual(question);
+  });
+
+  it("supplies every persisted person for retained discovery after course ownership and the old Instructor's role change", async () => {
+    const question = await submitComment(
+      db,
+      base.user.id,
+      lesson.id,
+      null,
+      "An older question.",
+      NOW,
+      { notifications }
+    );
+    const replacement = db
+      .insert(users)
+      .values({
+        name: "New Instructor",
+        email: "new@example.com",
+        role: UserRole.Instructor,
+      })
+      .returning()
+      .get();
+    db.update(courses)
+      .set({ instructorId: replacement.id })
+      .where(eq(courses.id, base.course.id))
+      .run();
+    db.update(users)
+      .set({ role: UserRole.Student })
+      .where(eq(users.id, base.instructor.id))
+      .run();
+
+    await submitCommentDeletion(db, question.id, base.user.id, false, NOW, {
+      notifications,
+    });
+
+    expect(notifications.archives).toEqual([
+      {
+        commentId: question.id,
+        personIds: expect.arrayContaining([
+          base.user.id,
+          base.instructor.id,
+          replacement.id,
+        ]),
+      },
+    ]);
+    expect(notifications.activeDeliveries).toEqual([]);
+  });
+
+  it("keeps the deletion committed and returns success when archival fails", async () => {
+    const question = await submitComment(
+      db,
+      base.user.id,
+      lesson.id,
+      null,
+      "My question.",
+      NOW,
+      { notifications }
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    notifications.failures.add("archiveComment");
+
+    const deleted = await submitCommentDeletion(
+      db,
+      question.id,
+      base.user.id,
+      false,
+      NOW,
+      { notifications }
+    );
+
+    expect(deleted.deletedAt).toBe(NOW.toISOString());
+    expect(
+      db.select().from(comments).where(eq(comments.id, question.id)).get()
+    ).toEqual(deleted);
+    expect(notifications.activeDeliveries).toHaveLength(1);
+    expect(notifications.triggers).toHaveLength(1);
+    expect(log).toHaveBeenCalled();
+  });
+
+  it("does not archive for denied deletion, a missing comment, or a rejected database write", async () => {
+    const question = await submitComment(
+      db,
+      base.user.id,
+      lesson.id,
+      null,
+      "My question.",
+      NOW,
+      { notifications }
+    );
+    await expect(
+      submitCommentDeletion(db, question.id, base.instructor.id, false, NOW, {
+        notifications,
+      })
+    ).rejects.toThrow("You can only delete your own comments");
+    await expect(
+      submitCommentDeletion(db, 999, base.user.id, false, NOW, {
+        notifications,
+      })
+    ).rejects.toThrow("Comment not found");
+    db.$client.exec(
+      "CREATE TRIGGER reject_deletion BEFORE UPDATE ON comments BEGIN SELECT RAISE(ABORT, 'cannot delete comment'); END"
+    );
+    await expect(
+      submitCommentDeletion(db, question.id, base.user.id, false, NOW, {
+        notifications,
+      })
+    ).rejects.toThrow();
+    expect(notifications.archives).toEqual([]);
+    expect(notifications.activeDeliveries).toHaveLength(1);
+    expect(
+      db.select().from(comments).where(eq(comments.id, question.id)).get()
+    ).toEqual(question);
+  });
 });
 
 describe("Discussion Notification delivery", () => {
