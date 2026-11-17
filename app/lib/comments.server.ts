@@ -6,13 +6,7 @@ import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
 
 type Db = BetterSQLite3Database<typeof schema>;
 
-export function deleteComment(
-  db: Db,
-  commentId: number,
-  userId: number,
-  isStaff: boolean,
-  now: Date = new Date()
-) {
+function requireComment(db: Db, commentId: number) {
   const existing = db
     .select()
     .from(comments)
@@ -21,6 +15,17 @@ export function deleteComment(
   if (!existing) {
     throw new Error("Comment not found");
   }
+  return existing;
+}
+
+export function deleteComment(
+  db: Db,
+  commentId: number,
+  userId: number,
+  isStaff: boolean,
+  now: Date = new Date()
+) {
+  const existing = requireComment(db, commentId);
   if (existing.userId !== userId && !isStaff) {
     throw new Error("You can only delete your own comments");
   }
@@ -57,14 +62,7 @@ export function updateComment(
   now: Date = new Date()
 ) {
   const trimmed = assertValidBody(body);
-  const existing = db
-    .select()
-    .from(comments)
-    .where(eq(comments.id, commentId))
-    .get();
-  if (!existing) {
-    throw new Error("Comment not found");
-  }
+  const existing = requireComment(db, commentId);
   if (existing.deletedAt !== null) {
     throw new Error("Comment has been deleted");
   }
