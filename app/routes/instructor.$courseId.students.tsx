@@ -437,8 +437,9 @@ export default function InstructorStudentRoster({
 
                     return (
                       <tr
+                        id={`student-${student.userId}`}
                         key={student.userId}
-                        className="border-b border-border last:border-0"
+                        className="scroll-mt-4 border-b border-border last:border-0 target:bg-primary/5"
                       >
                         <td className="px-4 py-3">
                           <div>

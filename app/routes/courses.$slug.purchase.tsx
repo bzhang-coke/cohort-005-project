@@ -38,7 +38,8 @@ import { formatDuration, formatPrice } from "~/lib/utils";
 import { resolveCountry } from "~/lib/country.server";
 import { calculatePppPrice, getCountryTierInfo, COUNTRIES } from "~/lib/ppp";
 import { parseFormData, parseParams } from "~/lib/validation";
-import { createIndividualPurchase } from "~/lib/enrollments.server";
+import { submitIndividualPurchase } from "~/lib/enrollments.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 
 function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
@@ -304,7 +305,7 @@ export async function loader({ params, request, url }: Route.LoaderArgs) {
   };
 }
 
-export async function action({ params, request }: Route.ActionArgs) {
+export async function action({ params, request, context }: Route.ActionArgs) {
   const { slug } = parseParams(params, purchaseParamsSchema);
   const course = getCourseBySlug(slug);
 
@@ -327,7 +328,14 @@ export async function action({ params, request }: Route.ActionArgs) {
   const country = await resolveCountry(request);
 
   if (parsed.data.intent === "confirm-purchase") {
-    const result = createIndividualPurchase(db, currentUserId, course.id, country);
+    const result = await submitIndividualPurchase(
+      db,
+      currentUserId,
+      course.id,
+      country,
+      new Date(),
+      { notifications: context.get(notificationTransportContext) ?? undefined }
+    );
     if (!result.ok) {
       throw redirect(`/courses/${slug}`);
     }

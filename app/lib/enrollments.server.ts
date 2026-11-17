@@ -1,9 +1,12 @@
 import { and, eq } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import type * as schema from "~/db/schema";
-import { coupons, courses, enrollments, purchases } from "~/db/schema";
+import { coupons, courses, enrollments, purchases, users } from "~/db/schema";
 import { calculatePppPrice } from "~/lib/ppp";
 import { getSeatAvailability } from "~/lib/refunds.server";
+import type { NotificationEvent } from "~/lib/notifications";
+import { deliverNotification } from "~/lib/notifications.server";
+import type { NotificationTransport } from "~/lib/notifications/transport.server";
 
 type Db = BetterSQLite3Database<typeof schema>;
 type IndividualPurchaseResult =
@@ -62,6 +65,62 @@ export function createIndividualPurchase(
 
     return { ok: true, purchase, enrollment };
   });
+}
+
+function enrollmentNotification(
+  db: Db,
+  enrollment: typeof enrollments.$inferSelect,
+  origin: { purchaseId: number; seatId?: number }
+): NotificationEvent | null {
+  const course = db
+    .select()
+    .from(courses)
+    .where(eq(courses.id, enrollment.courseId))
+    .get();
+  const student = db
+    .select()
+    .from(users)
+    .where(eq(users.id, enrollment.userId))
+    .get();
+  if (!course || !student) return null;
+  return {
+    kind: "enrollment-created",
+    recordId: enrollment.id,
+    recipientIds: [course.instructorId],
+    actorId: enrollment.userId,
+    data: {
+      category: "enrollments",
+      title: `${student.name} enrolled in your course`,
+      context: course.title,
+      destination: `/instructor/${course.id}/students#student-${student.id}`,
+      source: { enrollmentId: enrollment.id, courseId: course.id, ...origin },
+      snapshot: { studentName: student.name, courseTitle: course.title },
+    },
+  };
+}
+
+export async function submitIndividualPurchase(
+  db: Db,
+  userId: number,
+  courseId: number,
+  country: string | null,
+  now: Date = new Date(),
+  dependencies: { notifications?: NotificationTransport } = {}
+): Promise<IndividualPurchaseResult> {
+  const result = createIndividualPurchase(db, userId, courseId, country, now);
+  if (!result.ok) return result;
+  try {
+    const event = enrollmentNotification(db, result.enrollment, {
+      purchaseId: result.purchase.id,
+    });
+    if (event) await deliverNotification(event, dependencies.notifications);
+  } catch (error) {
+    console.error(
+      "Enrollment Notification failed after Purchase committed.",
+      error
+    );
+  }
+  return result;
 }
 
 type SeatClaimResult =
