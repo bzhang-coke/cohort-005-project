@@ -83,17 +83,61 @@ export function NotificationFeed({ personId }: { personId: number }) {
     controller.getSnapshot,
     controller.getSnapshot
   );
+  const [narrow, setNarrow] = useState(false);
+  const [scrollRoot, setScrollRoot] = useState<HTMLDivElement | null>(null);
+  const [pageSentinel, setPageSentinel] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     void controller.setPerson(personId);
     return () => controller.dispose();
   }, [controller, personId]);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 639px)");
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    if (
+      !state.open ||
+      state.status !== "ready" ||
+      !state.nextCursor ||
+      state.pageLoading ||
+      state.pageError ||
+      state.busy ||
+      !scrollRoot ||
+      !pageSentinel
+    )
+      return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting))
+          void controller.loadMore();
+      },
+      { root: scrollRoot, rootMargin: "0px 0px 120px 0px" }
+    );
+    observer.observe(pageSentinel);
+    return () => observer.disconnect();
+  }, [
+    controller,
+    scrollRoot,
+    pageSentinel,
+    state.open,
+    state.status,
+    state.nextCursor,
+    state.pageLoading,
+    state.pageError,
+    state.busy,
+    state.items,
+  ]);
   const badge = notificationBadge(state.unseen);
   async function activate(id: string) {
     const destination = await controller.activate(id);
     if (destination) await navigate(destination);
   }
   async function retry() {
-    if (state.status === "error") await controller.setPerson(personId);
+    if (state.items.length) await controller.refresh();
+    else if (state.status === "error") await controller.setPerson(personId);
     await controller.setOpen(true);
   }
   return (
@@ -126,17 +170,29 @@ export function NotificationFeed({ personId }: { personId: number }) {
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
-          side="right"
+          side={narrow ? "bottom" : "right"}
           align="start"
-          sideOffset={12}
+          sideOffset={narrow ? 8 : 12}
           collisionPadding={8}
           aria-labelledby="notification-feed-title"
-          className="z-50 flex max-h-[min(36rem,calc(100dvh-1rem))] w-[min(24rem,calc(100vw-1rem))] flex-col rounded-xl border bg-popover text-popover-foreground shadow-lg outline-none"
+          className="z-50 flex max-h-[min(36rem,var(--radix-popover-content-available-height))] w-[min(24rem,calc(100vw-1rem))] flex-col rounded-xl border bg-popover text-popover-foreground shadow-lg outline-none"
         >
-          <div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-3">
             <h2 id="notification-feed-title" className="font-semibold">
               Notifications
             </h2>
+            <button
+              type="button"
+              disabled={
+                state.busy || state.status !== "ready" || state.unread === 0
+              }
+              onClick={() => {
+                void controller.markAllRead();
+              }}
+              className="ml-auto rounded px-1 py-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
+            >
+              Mark all as read
+            </button>
             <Link
               to="/settings#notifications"
               aria-label="Notification settings"
@@ -149,8 +205,14 @@ export function NotificationFeed({ personId }: { personId: number }) {
             </Link>
           </div>
           <div
-            className="overflow-y-auto overscroll-contain"
-            aria-busy={state.status === "loading" || state.busy}
+            ref={setScrollRoot}
+            tabIndex={0}
+            role="region"
+            aria-label="Notification history"
+            className="min-h-0 overflow-y-auto overscroll-contain rounded-b-xl focus-visible:outline-2 focus-visible:outline-ring"
+            aria-busy={
+              state.status === "loading" || state.busy || state.pageLoading
+            }
           >
             {state.status === "loading" && (
               <p role="status" className="p-6 text-sm text-muted-foreground">
@@ -236,6 +298,29 @@ export function NotificationFeed({ personId }: { personId: number }) {
                 </li>
               ))}
             </ul>
+            {state.pageLoading && (
+              <p
+                role="status"
+                className="p-4 text-center text-sm text-muted-foreground"
+              >
+                Loading older Notifications…
+              </p>
+            )}
+            {state.pageError && (
+              <div role="alert" className="border-t p-4 text-sm">
+                <p>{state.pageError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void controller.loadMore();
+                  }}
+                  className="mt-2 rounded underline focus-visible:outline-2"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
+            <div ref={setPageSentinel} aria-hidden="true" className="h-px" />
           </div>
         </Popover.Content>
       </Popover.Portal>

@@ -81,6 +81,8 @@ export type NotificationFeedState = NotificationPage & {
   error: string | null;
   statusError: string | null;
   busy: boolean;
+  pageLoading: boolean;
+  pageError: string | null;
 };
 const emptyPage: NotificationPage = {
   items: [],
@@ -104,6 +106,8 @@ export function createNotificationFeedController(dependencies: {
     error: null,
     statusError: null,
     busy: false,
+    pageLoading: false,
+    pageError: null,
   };
   const listeners = new Set<() => void>();
   type Session = {
@@ -126,29 +130,70 @@ export function createNotificationFeedController(dependencies: {
     previous?.unsubscribe?.();
     previous?.client?.dispose();
   }
+  async function refreshHistory(
+    current: Session,
+    client: NotificationFeedClient
+  ) {
+    do {
+      current.queued = false;
+      try {
+        // Reconcile the visible range, including older rows whose statuses
+        // changed. New arrivals may move page boundaries, so stop at the
+        // previous oldest row (or past its time if it was archived), not at
+        // a fixed page count. Keep the previous view until all reads succeed.
+        const oldest = state.items.at(-1);
+        const previousCursor = state.nextCursor;
+        const exhausted = previousCursor === null;
+        const items = new Map<string, NotificationRow>();
+        const cursors = new Set<string>();
+        let page = await client.list();
+        while (current === session) {
+          for (const item of page.items) items.set(item.id, item);
+          const last = page.items.at(-1);
+          if (
+            !oldest ||
+            !page.nextCursor ||
+            (!exhausted &&
+              (items.has(oldest.id) ||
+                (last &&
+                  Date.parse(last.createdAt) < Date.parse(oldest.createdAt))))
+          )
+            break;
+          if (cursors.has(page.nextCursor))
+            throw new Error("Notification history cursor did not advance.");
+          cursors.add(page.nextCursor);
+          page = await client.list(page.nextCursor);
+        }
+        if (current === session) {
+          const ordered = [...items.values()].sort(
+            (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+          );
+          const boundary = ordered.findIndex((item) => item.id === oldest?.id);
+          const keepBoundary = !exhausted && boundary >= 0;
+          update({
+            ...page,
+            items: keepBoundary ? ordered.slice(0, boundary + 1) : ordered,
+            nextCursor: keepBoundary ? previousCursor : page.nextCursor,
+            status: "ready",
+            error: null,
+          });
+        }
+      } catch {
+        if (current === session)
+          update({
+            status: "error",
+            error: "Notifications could not load. Please try again.",
+          });
+      }
+    } while (current === session && current.queued);
+  }
   async function refresh(current = session): Promise<void> {
     if (!current?.client || current !== session) return;
     if (current.pending) {
       current.queued = true;
       return current.pending;
     }
-    const client = current.client;
-    current.pending = (async () => {
-      do {
-        current.queued = false;
-        try {
-          const page = await client.list();
-          if (current === session)
-            update({ ...page, status: "ready", error: null });
-        } catch {
-          if (current === session)
-            update({
-              status: "error",
-              error: "Notifications could not load. Please try again.",
-            });
-        }
-      } while (current === session && current.queued);
-    })();
+    current.pending = refreshHistory(current, current.client);
     try {
       await current.pending;
     } finally {
@@ -172,6 +217,9 @@ export function createNotificationFeedController(dependencies: {
         await refresh(current);
         return current === session;
       } catch (error) {
+        // A rejected or still-processing write may have changed some remote
+        // rows. Preserve the failure feedback and reconcile confirmed state.
+        if (current === session) await refresh(current);
         if (current === session)
           update({
             statusError:
@@ -189,6 +237,45 @@ export function createNotificationFeedController(dependencies: {
       return await pending;
     } finally {
       if (current.mutation === pending) current.mutation = undefined;
+    }
+  }
+  async function loadMore() {
+    const current = session;
+    if (!current?.client || !state.nextCursor) return;
+    if (current.pending) return current.pending;
+    const cursor = state.nextCursor;
+    const client = current.client;
+    update({ pageLoading: true, pageError: null });
+    current.pending = (async () => {
+      try {
+        const page = await client.list(cursor);
+        if (page.nextCursor === cursor)
+          throw new Error("Notification history cursor did not advance.");
+        if (current === session) {
+          const items = new Map(state.items.map((item) => [item.id, item]));
+          for (const item of page.items) items.set(item.id, item);
+          update({
+            ...page,
+            items: [...items.values()].sort(
+              (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+            ),
+          });
+        }
+      } catch {
+        if (current === session)
+          update({
+            pageError: "Older Notifications could not load. Please try again.",
+          });
+      } finally {
+        if (current === session && current.queued)
+          await refreshHistory(current, client);
+        if (current === session) update({ pageLoading: false });
+      }
+    })();
+    try {
+      await current.pending;
+    } finally {
+      current.pending = undefined;
     }
   }
   async function markRead(id: string) {
@@ -224,6 +311,8 @@ export function createNotificationFeedController(dependencies: {
             status: "error",
             open: false,
             busy: false,
+            pageLoading: false,
+            pageError: null,
             error: "Notifications could not reconnect. Please try again.",
           });
         }
@@ -254,6 +343,8 @@ export function createNotificationFeedController(dependencies: {
         error: null,
         statusError: null,
         busy: false,
+        pageLoading: false,
+        pageError: null,
       });
       if (personId === null) return;
       const current: Session = { personId, queued: false };
@@ -304,8 +395,14 @@ export function createNotificationFeedController(dependencies: {
       }
     },
     refresh: () => refresh(),
+    loadMore,
     setOpen,
     markRead,
+    markAllRead: () =>
+      mutate(
+        (client) => client.markAllRead(),
+        "Notifications could not all be marked read. Please try again."
+      ),
     async activate(id: string) {
       const current = session;
       const row = state.items.find((item) => item.id === id);
@@ -325,6 +422,8 @@ export function createNotificationFeedController(dependencies: {
         error: null,
         statusError: null,
         busy: false,
+        pageLoading: false,
+        pageError: null,
       });
     },
   };

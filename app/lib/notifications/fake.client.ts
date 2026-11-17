@@ -7,7 +7,8 @@ import type {
 
 export function createFakeNotificationFeedClient(
   items: NotificationRow[] = [],
-  counts?: { unseen: number; unread: number; total: number }
+  counts?: { unseen: number; unread: number; total: number },
+  pageSize = Infinity
 ) {
   let page: NotificationPage = {
     items: structuredClone(items),
@@ -25,9 +26,20 @@ export function createFakeNotificationFeedClient(
   } = {
     disposed: false,
     seenScope: null,
-    async list() {
+    async list(after) {
       if (failures.has("list")) throw new Error("Feed unavailable.");
-      return structuredClone(page);
+      const start = after
+        ? page.items.findIndex((item) => item.id === after) + 1
+        : 0;
+      const items = page.items.slice(start, start + pageSize);
+      return structuredClone({
+        ...page,
+        items,
+        nextCursor:
+          start + items.length < page.items.length
+            ? (items.at(-1)?.id ?? null)
+            : page.nextCursor,
+      });
     },
     async markRead(id) {
       if (failures.has("read")) throw new Error("Read unavailable.");
