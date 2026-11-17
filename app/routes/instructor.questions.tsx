@@ -13,7 +13,8 @@ import { UserAvatar } from "~/components/user-avatar";
 import { AlertTriangle, CheckCircle2, ExternalLink } from "lucide-react";
 import { cn, daysSince, formatRelativeTime } from "~/lib/utils";
 import { MAX_COMMENT_LENGTH } from "~/lib/comments";
-import { createComment } from "~/lib/comments.server";
+import { submitComment } from "~/lib/comments.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 import { parseFormData } from "~/lib/validation";
 import { db } from "~/db";
 import {
@@ -145,7 +146,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   return { questions: rendered, isAdmin };
 }
 
-export async function action({ request }: Route.ActionArgs) {
+export async function action({ request, context }: Route.ActionArgs) {
   const formData = await request.formData();
   const parsed = parseFormData(formData, replySchema);
 
@@ -172,12 +173,14 @@ export async function action({ request }: Route.ActionArgs) {
   }
 
   try {
-    createComment(
+    await submitComment(
       db,
       userId,
       question.lessonId,
       question.id,
-      parsed.data.body
+      parsed.data.body,
+      new Date(),
+      { notifications: context.get(notificationTransportContext) ?? undefined }
     );
   } catch (error) {
     if (error instanceof Error) {
