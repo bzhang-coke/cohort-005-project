@@ -2,6 +2,7 @@ import { NavLink, Form } from "react-router";
 import { useState, useEffect } from "react";
 import { cn } from "~/lib/utils";
 import { UserRole } from "~/db/schema";
+import { NotificationFeed } from "~/components/notification-feed";
 import { UserAvatar } from "~/components/user-avatar";
 import {
   BookOpen,
@@ -140,6 +141,9 @@ export function Sidebar({
         <NavLink to="/" className="text-lg font-bold tracking-tight">
           Cadence
         </NavLink>
+        {currentUser && (
+          <NotificationFeed key={currentUser.id} personId={currentUser.id} />
+        )}
       </div>
 
       <nav className="flex-1 space-y-1 p-3">

@@ -6,12 +6,46 @@ import {
   notificationCategories,
   type NotificationCategory,
   type NotificationSettings,
+  type NotificationEvent,
 } from "./notifications";
 import type {
   NotificationPerson,
   NotificationTransport,
 } from "./notifications/transport.server";
 import { getNotificationTransport } from "./notifications/config.server";
+
+// Called only after the entire domain write commits. Each catalogue event is
+// independent; a failed attempt must not stop another event or existing email.
+export async function deliverNotification(
+  event: NotificationEvent,
+  injectedTransport?: NotificationTransport
+) {
+  try {
+    const transport = injectedTransport ?? getNotificationTransport();
+    let recipientIds = [...new Set(event.recipientIds)].filter(
+      (id) => event.kind === "refund-request-confirmed" || id !== event.actorId
+    );
+    if (event.data.category === "enrollments") {
+      const optedIn: number[] = [];
+      for (const id of recipientIds) {
+        const preferences = await transport.getPreferences(id);
+        if (preferences?.enrollments?.channels.feed === true) optedIn.push(id);
+      }
+      recipientIds = optedIn;
+    }
+    if (!recipientIds.length) return;
+    await transport.trigger({
+      ...event,
+      recipientIds,
+      idempotencyKey: `cadence:${event.kind}:${event.recordId}`,
+    });
+  } catch (error) {
+    console.error(
+      `Notification delivery failed for ${event.kind}:${event.recordId}.`,
+      error
+    );
+  }
+}
 
 export async function getNotificationSettings(
   db: typeof database,

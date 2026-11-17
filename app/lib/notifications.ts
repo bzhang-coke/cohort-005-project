@@ -8,6 +8,44 @@ export const notificationCategories = [
 ] as const;
 
 export type NotificationCategory = (typeof notificationCategories)[number];
+
+export const notificationKinds = [
+  "refund-request-confirmed",
+  "refund-request-approved",
+  "refund-request-declined",
+  "refund-request-opened",
+  "seat-claimed",
+  "enrollment-created",
+  "discussion-question-created",
+  "discussion-reply-created",
+] as const;
+export type NotificationKind = (typeof notificationKinds)[number];
+export type NotificationContent = {
+  category: NotificationCategory;
+  title: string;
+  context: string;
+  destination: string | null;
+  source: {
+    refundRequestId?: number;
+    purchaseId?: number;
+    commentId?: number;
+    enrollmentId?: number;
+    seatId?: number;
+    courseId?: number;
+    lessonId?: number;
+  };
+  snapshot: Record<string, string | number | null>;
+};
+export type NotificationEvent = {
+  kind: NotificationKind;
+  recordId: number | string;
+  recipientIds: number[];
+  actorId: number | null;
+  data: NotificationContent;
+};
+export type NotificationDelivery = NotificationEvent & {
+  idempotencyKey: string;
+};
 export type NotificationPreferenceChange = {
   category: NotificationCategory;
   channel: "feed";

@@ -6,8 +6,9 @@ import { db } from "~/db";
 import { courses, purchases } from "~/db/schema";
 import { eq } from "drizzle-orm";
 import { parseFormData, parseParams } from "~/lib/validation";
-import { raiseRefundRequest } from "~/lib/refunds.server";
-import { sendEmail } from "~/lib/mailer.server";
+import { submitRefundRequest } from "~/lib/refunds.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
+import { mailTransportContext } from "~/lib/mailer.server";
 
 const refundParamsSchema = z.object({
   slug: z.string().min(1),
@@ -29,7 +30,7 @@ function getCourseBySlug(slug: string) {
   return db.select().from(courses).where(eq(courses.slug, slug)).get();
 }
 
-export async function action({ params, request }: Route.ActionArgs) {
+export async function action({ params, request, context }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -60,19 +61,21 @@ export async function action({ params, request }: Route.ActionArgs) {
     throw data("Purchase not found.", { status: 404 });
   }
 
-  const result = raiseRefundRequest(
+  const result = await submitRefundRequest(
     db,
     purchase.id,
     currentUserId,
     parsed.data.reason,
-    new Date()
+    new Date(),
+    {
+      notifications: context.get(notificationTransportContext) ?? undefined,
+      mail: context.get(mailTransportContext) ?? undefined,
+    }
   );
 
   if (!result.ok) {
     throw data(result.error, { status: result.status });
   }
-
-  await sendEmail(result.email);
 
   return redirect(result.kind === "team_licence" ? "/team" : "/settings");
 }

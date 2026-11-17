@@ -1,6 +1,7 @@
 import type {
   NotificationPreferenceChange,
   NotificationPreferences,
+  NotificationDelivery,
 } from "../notifications";
 import { createContext } from "react-router";
 
@@ -13,6 +14,7 @@ export type NotificationPerson = {
 
 export interface NotificationTransport {
   readonly available: boolean;
+  trigger(event: NotificationDelivery): Promise<void>;
   identify(person: NotificationPerson): Promise<void>;
   // null means no person-owned preference set, never a confirmed default.
   getPreferences(personId: number): Promise<NotificationPreferences | null>;

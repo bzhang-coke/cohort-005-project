@@ -352,3 +352,51 @@ describe("Knock Notification adapter", () => {
     });
   });
 });
+
+it("maps Cadence delivery to a feed workflow with stable idempotency and scalar comment lookup data", async () => {
+  let captured: Request | undefined;
+  const transport = knockNotificationTransport(
+    { secretApiKey: "secret", feedChannelId: "feed-id" },
+    async (input, init) => {
+      captured = new Request(input, init);
+      return Response.json({ workflow_run_id: "run-id" });
+    }
+  );
+  await transport.trigger({
+    kind: "discussion-reply-created",
+    recordId: 45,
+    recipientIds: [42],
+    actorId: 7,
+    idempotencyKey: "cadence:discussion-reply-created:45",
+    data: {
+      category: "discussionReplies",
+      title: "Ada replied",
+      context: "Lesson · A short answer",
+      destination: "/courses/course/lessons/4#comment-45",
+      source: { commentId: 45, lessonId: 4 },
+      snapshot: { snippet: "A short answer" },
+    },
+  });
+  if (!captured) throw new Error("Missing trigger request.");
+  expect(captured.url).toBe(
+    "https://api.knock.app/v1/workflows/cadence-discussion-reply-created/trigger"
+  );
+  expect(captured.headers.get("Idempotency-Key")).toBe(
+    "cadence:discussion-reply-created:45"
+  );
+  expect(await captured.json()).toEqual({
+    recipients: ["42"],
+    actor: "7",
+    data: {
+      eventKind: "discussion-reply-created",
+      eventId: "45",
+      commentId: 45,
+      category: "discussionReplies",
+      title: "Ada replied",
+      context: "Lesson · A short answer",
+      destination: "/courses/course/lessons/4#comment-45",
+      source: { commentId: 45, lessonId: 4 },
+      snapshot: { snippet: "A short answer" },
+    },
+  });
+});

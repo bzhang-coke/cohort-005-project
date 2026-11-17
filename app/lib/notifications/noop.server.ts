@@ -3,6 +3,9 @@ import type { NotificationTransport } from "./transport.server";
 export function noopNotificationTransport(): NotificationTransport {
   return {
     available: false,
+    async trigger(event) {
+      console.info(`Notifications disabled: skipped ${event.idempotencyKey}.`);
+    },
     async identify(person) {
       console.info(
         `Notifications disabled: skipped identity sync for person ${person.id}.`

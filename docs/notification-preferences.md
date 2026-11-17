@@ -15,7 +15,7 @@ Use Node 24 and the existing server environment names:
 - `KNOCK_SIGNING_KEY`
 - `KNOCK_FEED_CHANNEL_ID`
 
-The server loads local `.env` with Node's `loadEnvFile`; deployment-provided environment variables take precedence. These names and credentials never appear in client responses. Do not prefix private configuration with `VITE_`.
+The server loads local `.env` with Node's `loadEnvFile`; deployment-provided environment variables take precedence. Secret and signing keys remain server-side. The feed's credential endpoint returns only public configuration and the session person's signed token; preference responses contain no credentials. Do not prefix private configuration with `VITE_`.
 
 Fully keyless development uses the logging no-op. Its switches are unavailable and it cannot report a successful save. Any partial configuration, or keyless production, produces a configuration error rather than falling back silently. Identity sync logs configuration/provider failures after the Cadence write and does not undo that write.
 

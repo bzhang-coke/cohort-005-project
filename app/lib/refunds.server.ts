@@ -1,4 +1,13 @@
-import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  sql,
+} from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { alias } from "drizzle-orm/sqlite-core";
 import * as schema from "~/db/schema";
@@ -17,6 +26,9 @@ import {
   RefundStatus,
 } from "~/db/schema";
 import { formatPrice } from "~/lib/utils";
+import { deliverNotification } from "./notifications.server";
+import type { NotificationTransport } from "./notifications/transport.server";
+import { sendEmail, type MailTransport } from "./mailer.server";
 import {
   REFUND_COMPLETION_LIMIT,
   REFUND_WATCH_LIMIT_SECONDS,
@@ -215,8 +227,7 @@ function getRefundFigures(db: Queryable, purchase: Purchase): RefundFigures {
 /** What the buyer is told when they can't raise a Refund Request. */
 const RULE_BREAK_ERRORS: Record<RuleBreak, string> = {
   window_closed: `The ${REFUND_WINDOW_DAYS}-day window has closed.`,
-  watched_too_much:
-    "You have watched too much of this course to get a refund.",
+  watched_too_much: "You have watched too much of this course to get a refund.",
   completed_too_much:
     "You have completed too much of this course to request a refund.",
   seat_claimed: "A Team Licence with a claimed Seat cannot be refunded.",
@@ -259,7 +270,11 @@ function findRuleBreaks(
 
 // ─── Raising a Refund Request ───
 
-export type Failure = { ok: false; status: 400 | 403 | 404 | 409; error: string };
+export type Failure = {
+  ok: false;
+  status: 400 | 403 | 404 | 409;
+  error: string;
+};
 
 type RefundCheck = { ok: true; purchase: Purchase } | Failure;
 
@@ -408,6 +423,56 @@ export function raiseRefundRequest(
   };
 }
 
+// The public submission path owns side effects after the synchronous write has
+// committed. Existing email exceptions retain their behavior, but cannot skip
+// the independent best-effort Notification attempt.
+export async function submitRefundRequest(
+  db: Db,
+  purchaseId: number,
+  buyerId: number,
+  reason: string,
+  now: Date,
+  dependencies: {
+    notifications?: NotificationTransport;
+    mail?: MailTransport;
+  } = {}
+): Promise<RaiseResult> {
+  const result = raiseRefundRequest(db, purchaseId, buyerId, reason, now);
+  if (!result.ok) return result;
+  const purchase = getPurchase(db, purchaseId);
+  const course = purchase
+    ? db.select().from(courses).where(eq(courses.id, purchase.courseId)).get()
+    : undefined;
+  if (purchase && course) {
+    await deliverNotification(
+      {
+        kind: "refund-request-confirmed",
+        recordId: result.refundRequestId,
+        recipientIds: [purchase.userId],
+        actorId: null,
+        data: {
+          category: "refundRequestUpdates",
+          title: "Refund Request received",
+          context: `${course.title} · ${formatPrice(purchase.amountPaid)} · Your request is under review.`,
+          destination: null,
+          source: {
+            refundRequestId: result.refundRequestId,
+            purchaseId,
+            courseId: course.id,
+          },
+          snapshot: {
+            courseTitle: course.title,
+            amountPaid: purchase.amountPaid,
+          },
+        },
+      },
+      dependencies.notifications
+    );
+  }
+  await sendEmail(result.email, dependencies.mail);
+  return result;
+}
+
 // ─── Listing Refund Requests ───
 
 const deciders = alias(users, "deciders");
@@ -500,7 +565,8 @@ export function listRefundRequestsForReview(
       // A Claimed Seat belongs to another student, so the only way out of
       // that request is a decline. See docs/adr/0003.
       canApprove:
-        row.status === RefundStatus.Open && !ruleBreaks.includes("seat_claimed"),
+        row.status === RefundStatus.Open &&
+        !ruleBreaks.includes("seat_claimed"),
     };
   });
 }

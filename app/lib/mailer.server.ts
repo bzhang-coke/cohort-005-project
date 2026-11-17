@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createContext } from "react-router";
 
 // ─── Transactional email ───
 // Postmark delivers every email when POSTMARK_SERVER_TOKEN is set. Without a
@@ -15,6 +16,7 @@ export type Email = {
 export interface MailTransport {
   send(email: Email): Promise<void>;
 }
+export const mailTransportContext = createContext<MailTransport | null>(null);
 
 const FROM_ADDRESS = "Cadence <hello@cadence.dev>";
 

@@ -109,6 +109,39 @@ export function knockNotificationTransport(
 
   return {
     available: true,
+    async trigger(event) {
+      const response = await fetcher(
+        `https://api.knock.app/v1/workflows/cadence-${event.kind}/trigger`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.secretApiKey}`,
+            "Content-Type": "application/json",
+            "Idempotency-Key": event.idempotencyKey,
+          },
+          body: JSON.stringify({
+            recipients: event.recipientIds.map(String),
+            ...(event.actorId === null ? {} : { actor: String(event.actorId) }),
+            data: {
+              ...event.data,
+              eventKind: event.kind,
+              eventId: String(event.recordId),
+              ...(event.data.source.commentId === undefined
+                ? {}
+                : { commentId: event.data.source.commentId }),
+            },
+          }),
+          signal: AbortSignal.timeout(10_000),
+        }
+      );
+      if (!response.ok)
+        throw new Error(
+          `Knock Notification trigger failed (${response.status}).`
+        );
+      z.object({ workflow_run_id: z.string().min(1) }).parse(
+        await response.json()
+      );
+    },
     async identify(person) {
       return serialized(`${config.secretApiKey}:${person.id}`, async () => {
         await request(person.id, "", {

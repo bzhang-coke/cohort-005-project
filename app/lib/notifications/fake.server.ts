@@ -1,4 +1,8 @@
-import type { NotificationPreferences } from "../notifications";
+import {
+  defaultNotificationFeedPreference,
+  type NotificationDelivery,
+  type NotificationPreferences,
+} from "../notifications";
 import type {
   NotificationPerson,
   NotificationTransport,
@@ -7,18 +11,39 @@ import type {
 export function createFakeNotificationTransport() {
   const people = new Map<number, NotificationPerson>();
   const preferences = new Map<number, NotificationPreferences>();
+  const triggers: NotificationDelivery[] = [];
+  const deliveries: NotificationDelivery[] = [];
   const failures = new Set<
-    "identify" | "getPreferences" | "initializePreferences" | "setPreference"
+    | "identify"
+    | "getPreferences"
+    | "initializePreferences"
+    | "setPreference"
+    | "trigger"
   >();
   function checkFailure(
     operation:
-      "identify" | "getPreferences" | "initializePreferences" | "setPreference"
+      | "identify"
+      | "getPreferences"
+      | "initializePreferences"
+      | "setPreference"
+      | "trigger"
   ) {
     if (failures.has(operation))
       throw new Error(`Simulated Notification ${operation} failure.`);
   }
   const transport: NotificationTransport = {
     available: true,
+    async trigger(event) {
+      triggers.push(structuredClone(event));
+      checkFailure("trigger");
+      const recipientIds = event.recipientIds.filter(
+        (id) =>
+          preferences.get(id)?.[event.data.category]?.channels.feed ??
+          defaultNotificationFeedPreference(event.data.category)
+      );
+      if (recipientIds.length)
+        deliveries.push(structuredClone({ ...event, recipientIds }));
+    },
     async identify(person) {
       checkFailure("identify");
       people.set(person.id, structuredClone(person));
@@ -52,5 +77,11 @@ export function createFakeNotificationTransport() {
       return structuredClone(updated);
     },
   };
-  return Object.assign(transport, { people, preferences, failures });
+  return Object.assign(transport, {
+    people,
+    preferences,
+    failures,
+    triggers,
+    deliveries,
+  });
 }
