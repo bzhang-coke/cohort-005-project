@@ -8,12 +8,21 @@ import { createElement, type ComponentProps } from "react";
 import { renderToString } from "react-dom/server";
 import { eq } from "drizzle-orm";
 import { createTestDb, seedBaseData } from "~/test/setup";
-import { courses, enrollments, users, UserRole } from "~/db/schema";
+import {
+  coupons,
+  courses,
+  enrollments,
+  purchases,
+  teams,
+  users,
+  UserRole,
+} from "~/db/schema";
 import { setCurrentUserId } from "~/lib/session";
 import { createFakeNotificationTransport } from "~/lib/notifications/fake.server";
 import { notificationTransportContext } from "~/lib/notifications/transport.server";
 import { syncNotificationPerson } from "~/lib/notifications.server";
 import { action as purchaseAction } from "./courses.$slug.purchase";
+import { action as seatAction } from "./redeem.$code";
 import { action as preferenceAction } from "./api.notification-preferences";
 import InstructorStudentRoster, {
   loader as rosterLoader,
@@ -101,6 +110,84 @@ async function expectRedirect(action: Promise<unknown>, destination: string) {
       response.headers.get("Location") === destination
   );
 }
+
+async function claimAs(personId: number, code: string) {
+  return seatAction({
+    ...(await requestAs(
+      personId,
+      `/redeem/${code}`,
+      new URLSearchParams({ intent: "confirm-redeem" })
+    )),
+    params: { code },
+    pattern: "/redeem/:code",
+  });
+}
+
+it("delivers both events through the real Seat action and keeps Seat claims enabled after Enrollment opt-out", async () => {
+  await setEnrollmentPreference(true);
+  const team = db.insert(teams).values({}).returning().get();
+  const purchase = db
+    .insert(purchases)
+    .values({
+      userId: base.instructor.id,
+      courseId: base.course.id,
+      amountPaid: 15800,
+      country: "PL",
+    })
+    .returning()
+    .get();
+  db.insert(coupons)
+    .values(
+      ["FIRST-SEAT", "SECOND-SEAT"].map((code) => ({
+        teamId: team.id,
+        purchaseId: purchase.id,
+        courseId: base.course.id,
+        code,
+      }))
+    )
+    .run();
+
+  await expectRedirect(
+    claimAs(base.user.id, "FIRST-SEAT"),
+    "/courses/test-course/welcome"
+  );
+
+  expect(notifications.deliveries).toMatchObject([
+    { kind: "seat-claimed", recipientIds: [base.instructor.id] },
+    {
+      kind: "enrollment-created",
+      recipientIds: [base.instructor.id],
+      data: {
+        destination: `/instructor/${base.course.id}/students#student-${base.user.id}`,
+      },
+    },
+  ]);
+  expect(await claimAs(base.user.id, "FIRST-SEAT")).toMatchObject({
+    init: { status: 400 },
+  });
+  expect(notifications.triggers).toHaveLength(2);
+
+  await setEnrollmentPreference(false);
+  const nextStudent = db
+    .insert(users)
+    .values({
+      name: "Next Student",
+      email: "next@example.com",
+      role: UserRole.Student,
+    })
+    .returning()
+    .get();
+  await expectRedirect(
+    claimAs(nextStudent.id, "SECOND-SEAT"),
+    "/courses/test-course/welcome"
+  );
+  expect(notifications.deliveries.map((event) => event.kind)).toEqual([
+    "seat-claimed",
+    "enrollment-created",
+    "seat-claimed",
+  ]);
+  expect(db.select().from(enrollments).all()).toHaveLength(2);
+});
 
 it("delivers an Individual Purchase Enrollment through the real action after the Instructor opts in through Settings", async () => {
   await setEnrollmentPreference(true);
@@ -247,58 +334,71 @@ it.each(["signed-out", "student", "other instructor", "former instructor"])(
   }
 );
 
-it("shows synced Student context at the shared feed seam and reads before exact roster navigation", async () => {
-  await setEnrollmentPreference(true);
-  await syncNotificationPerson(
-    { ...base.user, avatarUrl: "https://example.com/student.png" },
-    notifications
-  );
-  await expectRedirect(
-    purchaseAs(base.user.id),
-    "/courses/test-course/welcome"
-  );
-  const event = notifications.deliveries[0];
-  const actor = notifications.people.get(base.user.id);
-  if (!event || !actor)
-    throw new Error("Missing Enrollment event or synced actor");
-  const client = createFakeNotificationFeedClient([
-    {
-      id: event.idempotencyKey,
-      category: event.data.category,
-      title: event.data.title,
-      context: event.data.context,
-      destination: event.data.destination,
-      actor,
-      createdAt: "2026-11-17T12:00:00.000Z",
-      read: false,
-      seen: false,
-    },
-  ]);
-  const feed = createNotificationFeedController({
-    credentials: async () => ({
-      mode: "live",
-      personId: base.instructor.id,
-      publicApiKey: "public",
-      feedChannelId: "feed",
-      userToken: "signed",
-      expiresAt: 9999999999999,
-    }),
-    connect: () => client,
-  });
-  await feed.setPerson(base.instructor.id);
-  await feed.setOpen(true);
-  expect(feed.getSnapshot().items[0]).toMatchObject({
-    category: "enrollments",
-    title: "Test User enrolled in your course",
-    context: "Test Course",
-    actor: { name: "Test User", avatarUrl: "https://example.com/student.png" },
-  });
-  // The checkmark operation returns a status only and keeps the feed open.
-  expect(await feed.markRead(event.idempotencyKey)).toBe(true);
-  expect(feed.getSnapshot()).toMatchObject({ open: true, unread: 0 });
-  expect(await feed.activate(event.idempotencyKey)).toBe(
-    `/instructor/${base.course.id}/students#student-${base.user.id}`
-  );
-  expect(feed.getSnapshot().items[0]?.read).toBe(true);
-  feed.dispose();
-});
+it.each(["row", "checkmark"])(
+  "shows synced Student context and honors the %s action at the shared feed seam",
+  async (control) => {
+    await setEnrollmentPreference(true);
+    await syncNotificationPerson(
+      { ...base.user, avatarUrl: "https://example.com/student.png" },
+      notifications
+    );
+    await expectRedirect(
+      purchaseAs(base.user.id),
+      "/courses/test-course/welcome"
+    );
+    const event = notifications.deliveries[0];
+    const actor = notifications.people.get(base.user.id);
+    if (!event || !actor)
+      throw new Error("Missing Enrollment event or synced actor");
+    const client = createFakeNotificationFeedClient([
+      {
+        id: event.idempotencyKey,
+        category: event.data.category,
+        title: event.data.title,
+        context: event.data.context,
+        destination: event.data.destination,
+        actor,
+        createdAt: "2026-11-17T12:00:00.000Z",
+        read: false,
+        seen: false,
+      },
+    ]);
+    const feed = createNotificationFeedController({
+      credentials: async () => ({
+        mode: "live",
+        personId: base.instructor.id,
+        publicApiKey: "public",
+        feedChannelId: "feed",
+        userToken: "signed",
+        expiresAt: 9999999999999,
+      }),
+      connect: () => client,
+    });
+    await feed.setPerson(base.instructor.id);
+    await feed.setOpen(true);
+    expect(feed.getSnapshot().items[0]).toMatchObject({
+      category: "enrollments",
+      title: "Test User enrolled in your course",
+      context: "Test Course",
+      actor: {
+        name: "Test User",
+        avatarUrl: "https://example.com/student.png",
+      },
+    });
+    if (control === "checkmark") {
+      // The checkmark operation returns a status only and keeps the feed open.
+      expect(await feed.markRead(event.idempotencyKey)).toBe(true);
+      expect(feed.getSnapshot()).toMatchObject({ open: true, unread: 0 });
+    } else {
+      client.failures.add("read");
+      expect(await feed.activate(event.idempotencyKey)).toBeNull();
+      expect(feed.getSnapshot()).toMatchObject({ open: true, unread: 1 });
+      client.failures.delete("read");
+      expect(await feed.activate(event.idempotencyKey)).toBe(
+        `/instructor/${base.course.id}/students#student-${base.user.id}`
+      );
+    }
+    expect(feed.getSnapshot().items[0]?.read).toBe(true);
+    feed.dispose();
+  }
+);

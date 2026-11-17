@@ -216,6 +216,21 @@ export async function submitSeatClaim(
   const result = claimSeat(db, code, userId, country, now);
   if (!result.ok) return result;
 
+  // Capture both catalogue entries before either delivery can yield. A later
+  // profile/course change or another claim must not rewrite this event.
+  let enrollmentEvent: NotificationEvent | null = null;
+  try {
+    enrollmentEvent = enrollmentNotification(db, result.enrollment, {
+      purchaseId: result.seat.purchaseId,
+      seatId: result.seat.id,
+    });
+  } catch (error) {
+    console.error(
+      `Enrollment Notification failed for Enrollment ${result.enrollment.id}.`,
+      error
+    );
+  }
+
   try {
     const details = db
       .select({
@@ -276,6 +291,9 @@ export async function submitSeatClaim(
       error
     );
   }
+
+  if (enrollmentEvent)
+    await deliverNotification(enrollmentEvent, dependencies.notifications);
 
   return result;
 }
