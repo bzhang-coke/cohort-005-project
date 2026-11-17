@@ -829,6 +829,77 @@ it("leaves failed queued seen reconciliation for another action or live event", 
   feed.dispose();
 });
 
+it("discards arrivals during a failed seen reconciliation and accepts fresh events after completion", async () => {
+  const client = createFakeNotificationFeedClient([row]);
+  const feed = feedFor(client);
+  await feed.setPerson(7);
+  await feed.setOpen(true);
+  const markAllSeen = client.markAllSeen;
+  let attempts = 0;
+  let failSeen = true;
+  client.markAllSeen = async () => {
+    attempts++;
+    if (failSeen) throw new Error("Seen unavailable.");
+    await markAllSeen();
+  };
+  const list = client.list;
+  const oldPage = await list();
+  let release: ((page: NotificationPage) => void) | undefined;
+  let refreshStarted: (() => void) | undefined;
+  const refreshing = new Promise<void>((resolve) => {
+    refreshStarted = resolve;
+  });
+  client.list = () => {
+    client.list = list;
+    return new Promise((resolve) => {
+      release = resolve;
+      refreshStarted?.();
+    });
+  };
+  const opening = feed.setOpen(true);
+  await refreshing;
+  const arrival = { ...row, id: "arrival" };
+  client.receive({
+    items: [arrival, { ...row, seen: true }],
+    unseen: 1,
+    unread: 2,
+    total: 2,
+    nextCursor: null,
+  });
+  release?.(oldPage);
+  await opening;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(attempts).toBe(1);
+  expect(feed.getSnapshot()).toMatchObject({
+    open: true,
+    busy: false,
+    unseen: 1,
+    statusError:
+      "Notifications could not be marked seen. Close and reopen the feed to try again.",
+  });
+
+  failSeen = false;
+  client.receive({
+    items: [{ ...row, id: "fresh-arrival" }, arrival, { ...row, seen: true }],
+    unseen: 2,
+    unread: 3,
+    total: 3,
+    nextCursor: null,
+  });
+  await feed.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(attempts).toBe(2);
+  expect(feed.getSnapshot()).toMatchObject({
+    open: true,
+    busy: false,
+    unseen: 0,
+    unread: 3,
+  });
+  feed.dispose();
+});
+
 it("reports list and status errors without claiming an empty feed or losing confirmed unread state", async () => {
   const client = createFakeNotificationFeedClient([row]);
   client.failures.add("list");

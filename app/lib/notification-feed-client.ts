@@ -120,6 +120,7 @@ export function createNotificationFeedController(dependencies: {
     pending?: Promise<void>;
     queued: boolean;
     seenQueued: boolean;
+    seenEpoch: number;
     renewal?: Promise<LiveNotificationIdentity>;
     mutation?: Promise<boolean>;
   };
@@ -230,7 +231,10 @@ export function createNotificationFeedController(dependencies: {
         if (current === session) {
           // Invalidations during this failed seen operation must not turn
           // reconciliation into an automatic retry of the write.
-          if (options.markingSeen) current.seenQueued = false;
+          if (options.markingSeen) {
+            current.seenQueued = false;
+            current.seenEpoch++;
+          }
           update({
             statusError:
               error instanceof NotificationStatusPending
@@ -371,7 +375,12 @@ export function createNotificationFeedController(dependencies: {
         })
       );
       if (personId === null) return;
-      const current: Session = { personId, queued: false, seenQueued: false };
+      const current: Session = {
+        personId,
+        queued: false,
+        seenQueued: false,
+        seenEpoch: 0,
+      };
       session = current;
       try {
         const identity = await dependencies.credentials();
@@ -396,7 +405,12 @@ export function createNotificationFeedController(dependencies: {
             update({ status: "error", error: event.message });
             return;
           }
-          void refresh(current).then(() => reconcileSeen(current));
+          const seenEpoch = current.seenEpoch;
+          void refresh(current).then(() => {
+            // A delayed callback may outlive the failed write's refresh.
+            // Only events from the current reconciliation epoch may queue it.
+            if (current.seenEpoch === seenEpoch) return reconcileSeen(current);
+          });
         });
         await refresh(current);
         if (current === session && state.open) await setOpen(true);
