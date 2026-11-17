@@ -3,7 +3,10 @@ import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import type * as schema from "~/db/schema";
 import { comments, courses, lessons, modules, users } from "~/db/schema";
 import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
-import { deliverNotification } from "~/lib/notifications.server";
+import {
+  archiveCommentNotifications,
+  deliverNotification,
+} from "~/lib/notifications.server";
 import type { NotificationTransport } from "~/lib/notifications/transport.server";
 
 type Db = BetterSQLite3Database<typeof schema>;
@@ -41,6 +44,36 @@ export function deleteComment(
     .where(eq(comments.id, commentId))
     .returning()
     .get();
+}
+
+export async function submitCommentDeletion(
+  db: Db,
+  commentId: number,
+  userId: number,
+  isStaff: boolean,
+  now: Date = new Date(),
+  dependencies: { notifications?: NotificationTransport } = {}
+) {
+  const comment = deleteComment(db, commentId, userId, isStaff, now);
+  try {
+    // Course ownership and roles can change after delivery. Retained feed
+    // entries may belong to anyone previously notified, not just today's owner.
+    const personIds = db
+      .select({ id: users.id })
+      .from(users)
+      .all()
+      .map((person) => person.id);
+    await archiveCommentNotifications(
+      { commentId: comment.id, personIds },
+      dependencies.notifications
+    );
+  } catch (error) {
+    console.error(
+      `Discussion Notification archival failed for comment ${comment.id}.`,
+      error
+    );
+  }
+  return comment;
 }
 
 function assertValidBody(body: string) {

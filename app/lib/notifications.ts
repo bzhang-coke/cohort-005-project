@@ -46,6 +46,11 @@ export type NotificationEvent = {
 export type NotificationDelivery = NotificationEvent & {
   idempotencyKey: string;
 };
+export type CommentNotificationArchive = {
+  commentId: number;
+  // All persisted people, including former recipients whose role changed.
+  personIds: number[];
+};
 export type NotificationPreferenceChange = {
   category: NotificationCategory;
   channel: "feed";

@@ -34,6 +34,52 @@ function feedFor(client: NotificationFeedClient) {
   });
 }
 
+it("reconciles an archived Discussion Question on explicit refresh, preserving the surviving read Discussion Reply and its destination", async () => {
+  const question = {
+    ...row,
+    id: "question",
+    category: "discussionQuestions" as const,
+    destination: "/courses/course/lessons/1#comment-45",
+  };
+  const reply = {
+    ...row,
+    id: "reply",
+    category: "discussionReplies" as const,
+    title: "An original answer",
+    context: "Lesson · Original snapshot",
+    destination: "/courses/course/lessons/1#comment-46",
+    createdAt: "2020-01-01T12:00:00Z",
+    read: true,
+    seen: true,
+  };
+  const client = createFakeNotificationFeedClient([question, reply]);
+  const feed = feedFor(client);
+  await feed.setPerson(7);
+  expect(feed.getSnapshot()).toMatchObject({ total: 2, unread: 1, unseen: 1 });
+  // The server archived a source while no live event was delivered. Focus,
+  // deletion completion, or opening the feed uses this same refresh boundary.
+  client.list = async () => ({
+    items: [reply],
+    nextCursor: null,
+    total: 1,
+    unread: 0,
+    unseen: 0,
+  });
+
+  await feed.refresh();
+
+  expect(feed.getSnapshot()).toMatchObject({
+    items: [reply],
+    total: 1,
+    unread: 0,
+    unseen: 0,
+  });
+  expect(await feed.activate("reply")).toBe(
+    "/courses/course/lessons/1#comment-46"
+  );
+  feed.dispose();
+});
+
 it("stops pagination with recoverable feedback if the history cursor does not advance", async () => {
   const client = createFakeNotificationFeedClient(
     [

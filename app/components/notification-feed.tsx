@@ -1,5 +1,5 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
-import { Link, useNavigate } from "react-router";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Link, useFetchers, useNavigate } from "react-router";
 import { Popover } from "radix-ui";
 import {
   Bell,
@@ -68,6 +68,8 @@ function Sender({ row }: { row: NotificationRow }) {
 
 export function NotificationFeed({ personId }: { personId: number }) {
   const navigate = useNavigate();
+  const fetchers = useFetchers();
+  const deletingComments = useRef(new Set<string>());
   const [controller] = useState(() =>
     createNotificationFeedController({
       credentials: fetchNotificationIdentity,
@@ -90,6 +92,34 @@ export function NotificationFeed({ personId }: { personId: number }) {
     void controller.setPerson(personId);
     return () => controller.dispose();
   }, [controller, personId]);
+  useEffect(() => {
+    const refresh = () => {
+      void controller.refresh();
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [controller]);
+  useEffect(() => {
+    // A deleted comment's form can unmount during revalidation. Track pending
+    // deletions here so completing/removing that fetcher still refreshes the
+    // current person's own feed even without an archive socket event.
+    const active = new Set<string>();
+    for (const fetcher of fetchers) {
+      if (fetcher.state === "idle") continue;
+      active.add(fetcher.key);
+      if (fetcher.formData?.get("intent") === "delete-comment") {
+        deletingComments.current.add(fetcher.key);
+      }
+    }
+    let completed = false;
+    for (const key of deletingComments.current) {
+      if (!active.has(key)) {
+        deletingComments.current.delete(key);
+        completed = true;
+      }
+    }
+    if (completed) void controller.refresh();
+  }, [controller, fetchers]);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 639px)");
     const update = () => setNarrow(media.matches);

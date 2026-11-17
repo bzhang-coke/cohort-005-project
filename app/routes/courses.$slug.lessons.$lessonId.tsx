@@ -11,7 +11,7 @@ import {
 } from "~/components/comment-thread";
 import {
   submitComment,
-  deleteComment,
+  submitCommentDeletion,
   updateComment,
 } from "~/lib/comments.server";
 import { notificationTransportContext } from "~/lib/notifications/transport.server";
@@ -847,7 +847,12 @@ export async function action({ params, request, context }: Route.ActionArgs) {
         if (!existing || existing.lessonId !== lessonId) {
           throw data("Comment not found", { status: 404 });
         }
-        updateComment(db, parsed.data.commentId, currentUserId, parsed.data.body);
+        updateComment(
+          db,
+          parsed.data.commentId,
+          currentUserId,
+          parsed.data.body
+        );
         return { ok: true };
       }
 
@@ -859,7 +864,16 @@ export async function action({ params, request, context }: Route.ActionArgs) {
       if (!existing || existing.lessonId !== lessonId) {
         throw data("Comment not found", { status: 404 });
       }
-      deleteComment(db, parsed.data.commentId, currentUserId, access.isStaff);
+      await submitCommentDeletion(
+        db,
+        parsed.data.commentId,
+        currentUserId,
+        access.isStaff,
+        new Date(),
+        {
+          notifications: context.get(notificationTransportContext) ?? undefined,
+        }
+      );
       return { ok: true };
     } catch (error) {
       // Service validation failures are user-correctable; anything thrown as a

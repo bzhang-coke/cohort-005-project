@@ -6,6 +6,11 @@ export function noopNotificationTransport(): NotificationTransport {
     async trigger(event) {
       console.info(`Notifications disabled: skipped ${event.idempotencyKey}.`);
     },
+    async archiveComment(source) {
+      console.info(
+        `Notifications disabled: skipped archival for comment ${source.commentId}.`
+      );
+    },
     async identify(person) {
       console.info(
         `Notifications disabled: skipped identity sync for person ${person.id}.`

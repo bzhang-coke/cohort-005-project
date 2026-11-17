@@ -33,6 +33,28 @@ const preferenceSetSchema = z
   .passthrough();
 type PreferenceSet = z.infer<typeof preferenceSetSchema>;
 
+const discussionItemSchema = z.object({
+  id: z.string().min(1),
+  data: z.object({ commentId: z.number() }),
+  source: z.object({
+    key: z.enum([
+      "cadence-discussion-question-created",
+      "cadence-discussion-reply-created",
+    ]),
+  }),
+});
+const discussionMessageSchema = discussionItemSchema.extend({
+  channel: z.object({ id: z.string() }),
+});
+const messagePageSchema = z.object({
+  items: z.array(z.unknown()),
+  page_info: z.object({ after: z.string().min(1).nullable() }),
+});
+const feedPageSchema = z.object({
+  entries: z.array(z.unknown()),
+  page_info: z.object({ after: z.string().min(1).nullable() }),
+});
+
 // Cadence is one process (ADR 0006). Share this across adapter instances so
 // identity writes, initialization, and preference saves stay ordered per person.
 const pending = new Map<string, Promise<unknown>>();
@@ -54,6 +76,20 @@ export function knockNotificationTransport(
   config: { secretApiKey: string; feedChannelId: string },
   fetcher: typeof fetch = fetch
 ): NotificationTransport {
+  async function archiveRequest(path: string, method = "GET") {
+    const response = await fetcher(`https://api.knock.app/v1${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${config.secretApiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Knock Notification archival request failed (${response.status}).`
+      );
+    }
+    return response;
+  }
+
   async function request(personId: number, suffix: string, body?: unknown) {
     const response = await fetcher(
       `https://api.knock.app/v1/users/${personId}${suffix}`,
@@ -109,6 +145,107 @@ export function knockNotificationTransport(
 
   return {
     available: true,
+    async archiveComment(source) {
+      const ids = new Set<string>();
+      const failures: unknown[] = [];
+      const query = new URLSearchParams({
+        channel_id: config.feedChannelId,
+        trigger_data: JSON.stringify({ commentId: source.commentId }),
+        page_size: "100",
+      });
+      let after: string | null = null;
+      const messageCursors = new Set<string>();
+      try {
+        do {
+          if (after) query.set("after", after);
+          const response = await archiveRequest(`/messages?${query}`);
+          const result: unknown = await response.json();
+          const page = messagePageSchema.parse(result);
+          for (const item of page.items) {
+            const parsed = discussionMessageSchema.safeParse(item);
+            if (
+              parsed.success &&
+              parsed.data.data.commentId === source.commentId &&
+              parsed.data.channel.id === config.feedChannelId
+            )
+              ids.add(parsed.data.id);
+          }
+          after = page.page_info.after;
+          if (after) {
+            if (messageCursors.has(after))
+              throw new Error("Knock repeated a message cursor.");
+            messageCursors.add(after);
+          }
+        } while (after);
+      } catch (error) {
+        failures.push(error);
+      }
+
+      // Message logs expire while feed entries remain. Inspect retained feed
+      // data without depending on a trigger-data index surviving log retention.
+      // A person's role or course ownership today does not prove past audience.
+      const personIds = [...new Set(source.personIds)];
+      for (let offset = 0; offset < personIds.length; offset += 4) {
+        await Promise.all(
+          personIds.slice(offset, offset + 4).map(async (personId) => {
+            try {
+              const feedQuery = new URLSearchParams({
+                status: "all",
+                archived: "exclude",
+                mode: "rich",
+                page_size: "100",
+              });
+              let cursor: string | null = null;
+              const feedCursors = new Set<string>();
+              do {
+                if (cursor) feedQuery.set("after", cursor);
+                const response = await archiveRequest(
+                  `/users/${personId}/feeds/${encodeURIComponent(config.feedChannelId)}?${feedQuery}`
+                );
+                const result: unknown = await response.json();
+                const page = feedPageSchema.parse(result);
+                for (const item of page.entries) {
+                  const parsed = discussionItemSchema.safeParse(item);
+                  if (
+                    parsed.success &&
+                    parsed.data.data.commentId === source.commentId
+                  ) {
+                    ids.add(parsed.data.id);
+                  }
+                }
+                cursor = page.page_info.after;
+                if (cursor) {
+                  if (feedCursors.has(cursor))
+                    throw new Error("Knock repeated a feed cursor.");
+                  feedCursors.add(cursor);
+                }
+              } while (cursor);
+            } catch (error) {
+              failures.push(error);
+            }
+          })
+        );
+      }
+
+      // Complete discovery before changing archived status, so cursor movement
+      // in the unarchived feed cannot make a later matching item disappear.
+      for (const id of ids) {
+        try {
+          await archiveRequest(
+            `/messages/${encodeURIComponent(id)}/archived`,
+            "PUT"
+          );
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length) {
+        throw new AggregateError(
+          failures,
+          "Notification archival was incomplete."
+        );
+      }
+    },
     async trigger(event) {
       const response = await fetcher(
         `https://api.knock.app/v1/workflows/cadence-${event.kind}/trigger`,
