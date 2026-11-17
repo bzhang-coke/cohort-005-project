@@ -34,7 +34,7 @@ const preferenceSetSchema = z
 type PreferenceSet = z.infer<typeof preferenceSetSchema>;
 
 // Cadence is one process (ADR 0006). Share this across adapter instances so
-// initialization cannot race another initialization or preference save.
+// identity writes, initialization, and preference saves stay ordered per person.
 const pending = new Map<string, Promise<unknown>>();
 async function serialized<T>(
   key: string,
@@ -110,10 +110,12 @@ export function knockNotificationTransport(
   return {
     available: true,
     async identify(person) {
-      await request(person.id, "", {
-        name: person.name,
-        email: person.email,
-        avatar: person.avatarUrl,
+      return serialized(`${config.secretApiKey}:${person.id}`, async () => {
+        await request(person.id, "", {
+          name: person.name,
+          email: person.email,
+          avatar: person.avatarUrl,
+        });
       });
     },
     async getPreferences(personId) {

@@ -34,11 +34,17 @@ export const notificationLabels: Record<NotificationCategory, string> = {
   discussionReplies: "Discussion Replies",
 };
 
+export function defaultNotificationFeedPreference(
+  category: NotificationCategory
+) {
+  return category !== "enrollments";
+}
+
 export function defaultNotificationPreferences(): NotificationPreferences {
   return Object.fromEntries(
     notificationCategories.map((category) => [
       category,
-      { channels: { feed: category !== "enrollments" } },
+      { channels: { feed: defaultNotificationFeedPreference(category) } },
     ])
   );
 }

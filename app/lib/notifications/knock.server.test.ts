@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setImmediate } from "node:timers/promises";
 import { z } from "zod";
 import { syncNotificationPerson } from "../notifications.server";
 import { knockNotificationTransport } from "./knock.server";
@@ -110,6 +111,58 @@ describe("Knock Notification adapter", () => {
       categories: {
         enrollments: { channel_types: { in_app_feed: true, email: false } },
       },
+    });
+  });
+
+  it("keeps the latest saved identity after overlapping syncs across adapter instances", async () => {
+    const remote = vendor();
+    let markFirstStarted: () => void = () => undefined;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    let releaseFirst: () => void = () => undefined;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const fetcher: typeof fetch = async (input, init) => {
+      const request = new Request(input, init);
+      if (
+        request.method === "PUT" &&
+        new URL(request.url).pathname === "/v1/users/42"
+      ) {
+        const identity = object.parse(await request.clone().json());
+        if (identity.name === "First saved name") {
+          markFirstStarted();
+          await firstHeld;
+        }
+      }
+      return remote.fetcher(request);
+    };
+    const config = { secretApiKey: "secret", feedChannelId: "feed-id" };
+    const first = syncNotificationPerson(
+      { ...person, name: "First saved name" },
+      knockNotificationTransport(config, fetcher)
+    );
+    await firstStarted;
+    const latest = syncNotificationPerson(
+      {
+        ...person,
+        name: "Latest saved name",
+        email: "latest@example.com",
+        avatarUrl: "https://example.com/latest.png",
+      },
+      knockNotificationTransport(config, fetcher)
+    );
+    // Let an uncoordinated newer request finish before releasing the older one.
+    // A serialized newer request can finish once the older request is released.
+    await setImmediate();
+    releaseFirst();
+    await Promise.all([first, latest]);
+
+    expect(remote.identity).toEqual({
+      name: "Latest saved name",
+      email: "latest@example.com",
+      avatar: "https://example.com/latest.png",
     });
   });
 

@@ -7,6 +7,7 @@ import {
   type NotificationPreferencesClient,
 } from "~/lib/notification-preferences-client";
 import {
+  defaultNotificationFeedPreference,
   notificationLabels,
   type NotificationCategory,
   type NotificationSettings,
@@ -52,13 +53,20 @@ export function NotificationPreferencesCard({
     };
   }, [client, personId, retry]);
 
+  function switchValue(
+    category: NotificationCategory,
+    pendingChanges: PendingChanges
+  ) {
+    return (
+      pendingChanges[category]?.enabled ??
+      settings?.preferences?.[category]?.channels.feed ??
+      defaultNotificationFeedPreference(category)
+    );
+  }
+
   function flip(category: NotificationCategory) {
     if (!settings || settings.status !== "ready") return;
-    const enabled = !(
-      changes.current[category]?.enabled ??
-      settings.preferences?.[category]?.channels.feed ??
-      category !== "enrollments"
-    );
+    const enabled = !switchValue(category, changes.current);
     const change = { category, channel: "feed" as const, enabled };
     const id = ++sequence.current;
     const current = lifecycle.current;
@@ -146,10 +154,7 @@ export function NotificationPreferencesCard({
               </p>
             )}
             {settings.categories.map((category) => {
-              const checked =
-                pending[category]?.enabled ??
-                settings.preferences?.[category]?.channels.feed ??
-                category !== "enrollments";
+              const checked = switchValue(category, pending);
               return (
                 <div
                   key={category}

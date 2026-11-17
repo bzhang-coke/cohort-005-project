@@ -31,7 +31,7 @@ npm run notifications:backfill
 
 The command reads people from the existing database, syncs identities/defaults, and prints ready/failed/disabled totals. It exits nonzero if any person failed or Notifications were disabled. It is safe to repeat after fixing configuration or a provider failure: saved choices are preserved, and no historical domain events are replayed. Seeding uses the same operation after its domain writes, without treating provider failure as a failed Cadence seed.
 
-Run the initial backfill before accepting preference changes or enabling delivery. Cadence's one-process architecture (ADR 0006) permits shared per-person serialization for initialization and saves. A separate backfill process cannot share that in-memory coordination; do not run independent bootstrap writers concurrently.
+Run the initial backfill before accepting preference changes or enabling delivery. Cadence's one-process architecture (ADR 0006) permits shared per-person serialization for identity writes, initialization, and preference saves. A separate backfill process cannot share that in-memory coordination; do not run independent bootstrap writers concurrently.
 
 Later Enrollment delivery must require a confirmed, explicit feed opt-in. A missing set, missing Enrollment leaf, provider error, or failed initialization is not an opt-in. Knock's permissive missing-preference fallback is not a safe Enrollment default.
 

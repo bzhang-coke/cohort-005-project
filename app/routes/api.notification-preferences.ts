@@ -26,12 +26,15 @@ async function currentPerson(request: Request) {
   return person;
 }
 
-export async function loader({ request, context }: Route.LoaderArgs) {
-  const person = await currentPerson(request);
+async function readSettings(
+  person: typeof users.$inferSelect,
+  context: Route.LoaderArgs["context"]
+) {
   try {
     const transport =
       context.get(notificationTransportContext) ?? getNotificationTransport();
-    return await getNotificationSettings(db, person, transport);
+    const settings = await getNotificationSettings(db, person, transport);
+    return { transport, settings };
   } catch (error) {
     console.error(
       `Notification preference read failed for person ${person.id}.`,
@@ -42,6 +45,12 @@ export async function loader({ request, context }: Route.LoaderArgs) {
       { status: 503 }
     );
   }
+}
+
+export async function loader({ request, context }: Route.LoaderArgs) {
+  const person = await currentPerson(request);
+  const { settings } = await readSettings(person, context);
+  return settings;
 }
 
 export async function action({ request, context }: Route.ActionArgs) {
@@ -55,22 +64,7 @@ export async function action({ request, context }: Route.ActionArgs) {
   const parsed = changeSchema.safeParse(body);
   if (!parsed.success)
     throw data("Invalid Notification preference.", { status: 400 });
-  let transport;
-  let settings;
-  try {
-    transport =
-      context.get(notificationTransportContext) ?? getNotificationTransport();
-    settings = await getNotificationSettings(db, person, transport);
-  } catch (error) {
-    console.error(
-      `Notification preference read failed for person ${person.id}.`,
-      error
-    );
-    throw data(
-      "Notification preferences could not be loaded. Please try again.",
-      { status: 503 }
-    );
-  }
+  const { transport, settings } = await readSettings(person, context);
   if (!settings.categories.includes(parsed.data.category))
     throw data(
       "This Notification category is not available for your account.",
