@@ -1,0 +1,20 @@
+{
+  "workflow": {
+    "name": "Cadence Discussion Reply",
+    "description": "Tells a Discussion Question's author about another person's new Discussion Reply. Cadence owns the text, recipient and event identity.",
+    "categories": ["discussion-replies"],
+    "settings": { "override_preferences": false },
+    "trigger_frequency": "every_trigger",
+    "steps": [
+      {
+        "ref": "feed",
+        "type": "channel",
+        "channel_type": "in_app_feed",
+        "channel_key": "SET_KNOCK_FEED_CHANNEL_KEY",
+        "template": {
+          "markdown_body": "{{ data.title }}\n\n{{ data.context }}"
+        }
+      }
+    ]
+  }
+}
