@@ -9,7 +9,12 @@ import {
   CommentThread,
   type RenderedComment,
 } from "~/components/comment-thread";
-import { createComment, deleteComment, updateComment } from "~/lib/comments.server";
+import {
+  submitComment,
+  deleteComment,
+  updateComment,
+} from "~/lib/comments.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 import { db } from "~/db";
 import {
   categories,
@@ -781,7 +786,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
   };
 }
 
-export async function action({ params, request }: Route.ActionArgs) {
+export async function action({ params, request, context }: Route.ActionArgs) {
   const { slug, lessonId } = parseParams(params, lessonParamsSchema);
 
   const course = getCourseBySlug(slug);
@@ -816,12 +821,17 @@ export async function action({ params, request }: Route.ActionArgs) {
         if (!parsed.success) {
           return { ok: false, error: "Enter a comment before posting." };
         }
-        createComment(
+        await submitComment(
           db,
           currentUserId,
           lessonId,
           parsed.data.parentId ?? null,
-          parsed.data.body
+          parsed.data.body,
+          new Date(),
+          {
+            notifications:
+              context.get(notificationTransportContext) ?? undefined,
+          }
         );
         return { ok: true };
       }

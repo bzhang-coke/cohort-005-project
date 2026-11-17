@@ -1,8 +1,10 @@
 import { eq } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import type * as schema from "~/db/schema";
-import { comments, courses, lessons, modules } from "~/db/schema";
+import { comments, courses, lessons, modules, users } from "~/db/schema";
 import { MIN_COMMENT_LENGTH, MAX_COMMENT_LENGTH } from "~/lib/comments";
+import { deliverNotification } from "~/lib/notifications.server";
+import type { NotificationTransport } from "~/lib/notifications/transport.server";
 
 type Db = BetterSQLite3Database<typeof schema>;
 
@@ -127,4 +129,82 @@ export function createComment(
     })
     .returning()
     .get();
+}
+
+// Both writing surfaces submit through this service. All validation and the
+// synchronous insert finish before any external Notification work begins.
+export async function submitComment(
+  db: Db,
+  userId: number,
+  lessonId: number,
+  parentId: number | null,
+  body: string,
+  now: Date = new Date(),
+  dependencies: { notifications?: NotificationTransport } = {}
+) {
+  const comment = createComment(db, userId, lessonId, parentId, body, now);
+
+  try {
+    const details = db
+      .select({
+        courseId: courses.id,
+        courseTitle: courses.title,
+        courseSlug: courses.slug,
+        instructorId: courses.instructorId,
+        lessonTitle: lessons.title,
+        actorName: users.name,
+      })
+      .from(lessons)
+      .innerJoin(modules, eq(lessons.moduleId, modules.id))
+      .innerJoin(courses, eq(modules.courseId, courses.id))
+      .innerJoin(users, eq(users.id, comment.userId))
+      .where(eq(lessons.id, comment.lessonId))
+      .get();
+    if (!details) throw new Error("Discussion Notification context not found");
+    const parent =
+      comment.parentId === null ? null : requireComment(db, comment.parentId);
+    // An owning Instructor's top-level post is not a Discussion Question.
+    if ((parent ?? comment).userId === details.instructorId) return comment;
+    const singleLine = comment.body.replace(/\s+/g, " ");
+    const snippet =
+      singleLine.length > 160 ? `${singleLine.slice(0, 159)}…` : singleLine;
+
+    await deliverNotification(
+      {
+        kind: parent
+          ? "discussion-reply-created"
+          : "discussion-question-created",
+        recordId: comment.id,
+        recipientIds: [parent?.userId ?? details.instructorId],
+        actorId: comment.userId,
+        data: {
+          category: parent ? "discussionReplies" : "discussionQuestions",
+          title: parent
+            ? `${details.actorName} replied to your Discussion Question`
+            : `${details.actorName} asked a Discussion Question`,
+          context: `${details.courseTitle} · ${details.lessonTitle}: ${snippet}`,
+          destination: `/courses/${details.courseSlug}/lessons/${comment.lessonId}#comment-${comment.id}`,
+          source: {
+            commentId: comment.id,
+            lessonId: comment.lessonId,
+            courseId: details.courseId,
+          },
+          snapshot: {
+            courseTitle: details.courseTitle,
+            lessonTitle: details.lessonTitle,
+            body: comment.body,
+            snippet,
+          },
+        },
+      },
+      dependencies.notifications
+    );
+  } catch (error) {
+    console.error(
+      `Discussion Notification failed for comment ${comment.id}.`,
+      error
+    );
+  }
+
+  return comment;
 }

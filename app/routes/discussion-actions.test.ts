@@ -1,5 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RouterContextProvider } from "react-router";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { eq } from "drizzle-orm";
+import {
+  createMemoryRouter,
+  RouterContextProvider,
+  RouterProvider,
+} from "react-router";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import {
   comments,
@@ -7,11 +14,18 @@ import {
   enrollments,
   lessons,
   modules,
+  purchases,
   users,
   UserRole,
 } from "~/db/schema";
 import { setCurrentUserId } from "~/lib/session";
-import { action as lessonAction } from "./courses.$slug.lessons.$lessonId";
+import { createFakeNotificationTransport } from "~/lib/notifications/fake.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
+import { CommentThread } from "~/components/comment-thread";
+import {
+  action as lessonAction,
+  loader as lessonLoader,
+} from "./courses.$slug.lessons.$lessonId";
 import { action as instructorAction } from "./instructor.questions";
 
 // Replace only the connection boundary: actions, access checks, sessions, and
@@ -25,10 +39,15 @@ vi.mock("~/db", () => ({
 let db: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
 let lesson: typeof lessons.$inferSelect;
+let notifications: ReturnType<typeof createFakeNotificationTransport>;
+let context: RouterContextProvider;
 
 beforeEach(() => {
   db = createTestDb();
   base = seedBaseData(db);
+  notifications = createFakeNotificationTransport();
+  context = new RouterContextProvider();
+  context.set(notificationTransportContext, notifications);
   const module = db
     .insert(modules)
     .values({
@@ -55,6 +74,11 @@ beforeEach(() => {
     .run();
 });
 
+afterEach(() => {
+  db.$client.close();
+  vi.restoreAllMocks();
+});
+
 async function postAs(userId: number | null, fields: Record<string, string>) {
   const url = "http://localhost/discussion";
   const cookie =
@@ -70,7 +94,7 @@ function callLessonAction(request: Request, lessonId = lesson.id) {
   return lessonAction({
     request,
     params: { slug: base.course.slug, lessonId: String(lessonId) },
-    context: new RouterContextProvider(),
+    context,
     url: new URL(request.url),
     pattern: "/courses/:slug/lessons/:lessonId",
   });
@@ -80,11 +104,201 @@ function callInstructorAction(request: Request) {
   return instructorAction({
     request,
     params: {},
-    context: new RouterContextProvider(),
+    context,
     url: new URL(request.url),
     pattern: "/instructor/questions",
   });
 }
+
+async function loadDestination(userId: number | null, commentId: number) {
+  const url = new URL(
+    `http://localhost/courses/${base.course.slug}/lessons/${lesson.id}#comment-${commentId}`
+  );
+  const cookie =
+    userId === null ? "" : await setCurrentUserId(new Request(url), userId);
+  return lessonLoader({
+    request: new Request(url, {
+      headers: { Cookie: cookie, "CF-IPCountry": "US" },
+    }),
+    params: { slug: base.course.slug, lessonId: String(lesson.id) },
+    context,
+    url,
+    pattern: "/courses/:slug/lessons/:lessonId",
+  });
+}
+
+function renderDiscussion(result: Awaited<ReturnType<typeof loadDestination>>) {
+  const router = createMemoryRouter([
+    {
+      path: "/",
+      element: createElement(CommentThread, {
+        comments: result.comments,
+        currentUserId: result.currentUserId,
+        canModerate: result.canModerate,
+        canPost: result.canViewContent,
+        instructorName: result.instructorName,
+      }),
+    },
+  ]);
+  try {
+    return renderToStaticMarkup(createElement(RouterProvider, { router }));
+  } finally {
+    router.dispose();
+  }
+}
+
+describe("Discussion Notification destinations", () => {
+  it("renders exact Question and Reply anchors, retaining the Reply anchor under a deleted parent", async () => {
+    await callLessonAction(
+      await postAs(base.user.id, {
+        intent: "create-comment",
+        body: "My question.",
+      })
+    );
+    const question = db.select().from(comments).get();
+    if (!question) throw new Error("Discussion Question was not saved");
+    await callInstructorAction(
+      await postAs(base.instructor.id, {
+        intent: "reply",
+        commentId: String(question.id),
+        body: "The surviving answer.",
+      })
+    );
+    const reply = db.select().from(comments).all()[1];
+    if (!reply) throw new Error("Discussion Reply was not saved");
+
+    const html = renderDiscussion(
+      await loadDestination(base.user.id, reply.id)
+    );
+    expect(html).toContain(`id="comment-${question.id}"`);
+    expect(html).toContain(`id="comment-${reply.id}"`);
+    await callLessonAction(
+      await postAs(base.user.id, {
+        intent: "delete-comment",
+        commentId: String(question.id),
+      })
+    );
+    const afterDeletion = renderDiscussion(
+      await loadDestination(base.user.id, reply.id)
+    );
+    expect(afterDeletion).toContain(`id="comment-${reply.id}"`);
+    expect(afterDeletion).toContain("The surviving answer.");
+    expect(afterDeletion).not.toContain("My question.");
+  });
+
+  it.each(["signed out", "lapsed", "country blocked"])(
+    "does not expose Discussion content from a Notification destination when %s",
+    async (access) => {
+      await callLessonAction(
+        await postAs(base.user.id, {
+          intent: "create-comment",
+          body: "Confidential question.",
+        })
+      );
+      const question = db.select().from(comments).get();
+      if (!question) throw new Error("Discussion Question was not saved");
+      if (access === "lapsed") {
+        db.delete(enrollments)
+          .where(eq(enrollments.userId, base.user.id))
+          .run();
+      } else if (access === "country blocked") {
+        db.update(courses)
+          .set({ price: 10000, pppEnabled: true })
+          .where(eq(courses.id, base.course.id))
+          .run();
+        db.insert(purchases)
+          .values({
+            userId: base.user.id,
+            courseId: base.course.id,
+            amountPaid: 2500,
+            country: "IN",
+          })
+          .run();
+      }
+      const destination = await loadDestination(
+        access === "signed out" ? null : base.user.id,
+        question.id
+      );
+      expect(destination.canViewContent).toBe(false);
+      expect(destination.comments).toEqual([]);
+      expect(renderDiscussion(destination)).not.toContain(
+        "Confidential question."
+      );
+    }
+  );
+});
+
+describe("Discussion action Notification failures and snapshots", () => {
+  it.each(["lesson question", "lesson reply", "instructor reply"])(
+    "keeps %s successful when Notification delivery fails",
+    async (surface) => {
+      const question =
+        surface !== "lesson question"
+          ? db
+              .insert(comments)
+              .values({
+                userId: base.user.id,
+                lessonId: lesson.id,
+                body: "My question.",
+              })
+              .returning()
+              .get()
+          : null;
+      notifications.failures.add("trigger");
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const fields: Record<string, string> =
+        surface === "instructor reply"
+          ? {
+              intent: "reply",
+              commentId: String(question?.id),
+              body: "Saved despite provider failure.",
+            }
+          : {
+              intent: "create-comment",
+              ...(question ? { parentId: String(question.id) } : {}),
+              body: "Saved despite provider failure.",
+            };
+      const request = await postAs(
+        question ? base.instructor.id : base.user.id,
+        fields
+      );
+      expect(
+        await (surface === "instructor reply"
+          ? callInstructorAction(request)
+          : callLessonAction(request))
+      ).toEqual({ ok: true });
+      expect(db.select().from(comments).all().at(-1)?.body).toBe(
+        "Saved despite provider failure."
+      );
+      expect(notifications.triggers).toHaveLength(1);
+      expect(notifications.deliveries).toEqual([]);
+    }
+  );
+
+  it("edits a saved comment without creating another Notification or changing the original snapshot", async () => {
+    await callLessonAction(
+      await postAs(base.user.id, {
+        intent: "create-comment",
+        body: "The original question.",
+      })
+    );
+    const original = structuredClone(notifications.deliveries);
+    const question = db.select().from(comments).get();
+    if (!question) throw new Error("Discussion Question was not saved");
+    expect(
+      await callLessonAction(
+        await postAs(base.user.id, {
+          intent: "edit-comment",
+          commentId: String(question.id),
+          body: "A clearer question.",
+        })
+      )
+    ).toEqual({ ok: true });
+    expect(db.select().from(comments).get()?.body).toBe("A clearer question.");
+    expect(notifications.deliveries).toEqual(original);
+    expect(notifications.triggers).toHaveLength(1);
+  });
+});
 
 describe("Instructor questions action", () => {
   it.each([false, true])(
@@ -118,6 +332,7 @@ describe("Instructor questions action", () => {
         init: { status: signedIn ? 403 : 401 },
       });
       expect(db.select().from(comments).all()).toEqual([question]);
+      expect(notifications.triggers).toEqual([]);
     }
   );
 
@@ -142,6 +357,7 @@ describe("Instructor questions action", () => {
       error: "Comment cannot be empty",
     });
     expect(db.select().from(comments).all()).toEqual([question]);
+    expect(notifications.triggers).toEqual([]);
   });
 
   it("saves an Instructor's Discussion Reply and returns the existing success response", async () => {
@@ -168,6 +384,19 @@ describe("Instructor questions action", () => {
         lessonId: lesson.id,
         parentId: question.id,
         body: "Here is how.",
+      }),
+    ]);
+    const reply = db.select().from(comments).all()[1];
+    expect(notifications.deliveries).toEqual([
+      expect.objectContaining({
+        kind: "discussion-reply-created",
+        recordId: reply?.id,
+        actorId: base.instructor.id,
+        recipientIds: [base.user.id],
+        data: expect.objectContaining({
+          destination: `/courses/test-course/lessons/${lesson.id}#comment-${reply?.id}`,
+          snapshot: expect.objectContaining({ body: "Here is how." }),
+        }),
       }),
     ]);
   });
@@ -256,6 +485,7 @@ describe("lesson discussion action", () => {
         init: { status: signedIn ? 403 : 401 },
       });
       expect(db.select().from(comments).all()).toEqual([]);
+      expect(notifications.triggers).toEqual([]);
     }
   );
 
@@ -291,6 +521,7 @@ describe("lesson discussion action", () => {
         data: "Comment not found",
       });
       expect(db.select().from(comments).all()).toEqual([otherComment]);
+      expect(notifications.triggers).toEqual([]);
     }
   );
 
@@ -305,6 +536,7 @@ describe("lesson discussion action", () => {
       error: "Lesson not found",
     });
     expect(db.select().from(comments).all()).toEqual([]);
+    expect(notifications.triggers).toEqual([]);
   });
 
   it.each([
@@ -317,6 +549,7 @@ describe("lesson discussion action", () => {
 
       expect(await callLessonAction(request)).toEqual({ ok: false, error });
       expect(db.select().from(comments).all()).toEqual([]);
+      expect(notifications.triggers).toEqual([]);
     }
   );
 
@@ -349,6 +582,19 @@ describe("lesson discussion action", () => {
         lessonId: lesson.id,
         parentId: question.id,
         body: "Here is how.",
+      }),
+    ]);
+    expect(notifications.deliveries).toEqual([
+      expect.objectContaining({
+        kind: "discussion-question-created",
+        actorId: base.user.id,
+        recipientIds: [base.instructor.id],
+        recordId: question.id,
+      }),
+      expect.objectContaining({
+        kind: "discussion-reply-created",
+        actorId: base.instructor.id,
+        recipientIds: [base.user.id],
       }),
     ]);
   });
@@ -397,5 +643,6 @@ describe("lesson discussion action", () => {
       data: "Lesson not found in this course",
     });
     expect(db.select().from(comments).all()).toEqual([]);
+    expect(notifications.triggers).toEqual([]);
   });
 });
