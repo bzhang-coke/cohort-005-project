@@ -209,7 +209,11 @@ export default function Settings({ loaderData }: Route.ComponentProps) {
           </CardHeader>
           <CardContent className="space-y-4">
             {refundRequests.map((refundRequest) => (
-              <div key={refundRequest.id} className="rounded-md border p-3">
+              <div
+                key={refundRequest.id}
+                id={`refund-request-${refundRequest.id}`}
+                className="scroll-mt-6 rounded-md border p-3"
+              >
                 <div className="flex items-start justify-between gap-3">
                   <Link
                     to={`/courses/${refundRequest.courseSlug}`}

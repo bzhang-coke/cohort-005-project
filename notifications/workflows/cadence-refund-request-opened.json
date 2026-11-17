@@ -1,0 +1,22 @@
+{
+  "workflow": {
+    "name": "Cadence Open Refund Request",
+    "description": "Tells current Platform Admins that a buyer has opened a Refund Request. Cadence owns recipients, content and the stable review destination.",
+    "categories": ["open-refund-requests"],
+    "settings": {
+      "override_preferences": false
+    },
+    "trigger_frequency": "every_trigger",
+    "steps": [
+      {
+        "ref": "feed",
+        "type": "channel",
+        "channel_type": "in_app_feed",
+        "channel_key": "SET_KNOCK_FEED_CHANNEL_KEY",
+        "template": {
+          "markdown_body": "{{ data.title }}\n\n{{ data.context }}"
+        }
+      }
+    ]
+  }
+}

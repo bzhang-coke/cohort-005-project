@@ -24,10 +24,12 @@ import {
   videoWatchEvents,
   LessonProgressStatus,
   RefundStatus,
+  UserRole,
 } from "~/db/schema";
 import { formatPrice } from "~/lib/utils";
 import { deliverNotification } from "./notifications.server";
 import type { NotificationTransport } from "./notifications/transport.server";
+import type { NotificationEvent } from "./notifications";
 import { sendEmail, type MailTransport } from "./mailer.server";
 import {
   REFUND_COMPLETION_LIMIT,
@@ -443,6 +445,45 @@ export async function submitRefundRequest(
   const course = purchase
     ? db.select().from(courses).where(eq(courses.id, purchase.courseId)).get()
     : undefined;
+  const buyer = db.select().from(users).where(eq(users.id, buyerId)).get();
+  const refundRequest = db
+    .select()
+    .from(refunds)
+    .where(eq(refunds.id, result.refundRequestId))
+    .get();
+  // Capture the audience and content before the first external await. A role
+  // or course change during confirmation delivery belongs to the next event.
+  const platformAdmins = db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.role, UserRole.Admin))
+    .all();
+  const opening: NotificationEvent | null =
+    purchase && course && buyer && refundRequest
+      ? {
+          kind: "refund-request-opened",
+          recordId: refundRequest.id,
+          recipientIds: platformAdmins.map((person) => person.id),
+          actorId: buyerId,
+          data: {
+            category: "openRefundRequests",
+            title: "New Open Refund Request",
+            context: `${buyer.name} · ${course.title} · ${formatPrice(purchase.amountPaid)} · ${refundRequest.reason}`,
+            destination: `/admin/refunds?refundRequestId=${refundRequest.id}#refund-request-${refundRequest.id}`,
+            source: {
+              refundRequestId: refundRequest.id,
+              purchaseId,
+              courseId: course.id,
+            },
+            snapshot: {
+              buyerName: buyer.name,
+              courseTitle: course.title,
+              amountPaid: purchase.amountPaid,
+              reason: refundRequest.reason,
+            },
+          },
+        }
+      : null;
   if (purchase && course) {
     await deliverNotification(
       {
@@ -469,6 +510,7 @@ export async function submitRefundRequest(
       dependencies.notifications
     );
   }
+  if (opening) await deliverNotification(opening, dependencies.notifications);
   await sendEmail(result.email, dependencies.mail);
   return result;
 }
@@ -796,6 +838,73 @@ export function declineRefundRequest(
       ),
     };
   });
+}
+
+/** Sends the buyer's decision update only after all entitlement writes commit. */
+export async function submitRefundDecision(
+  db: Db,
+  refundRequestId: number,
+  platformAdminId: number,
+  intent: "approve" | "decline",
+  note: string | null,
+  now: Date,
+  dependencies: {
+    notifications?: NotificationTransport;
+    mail?: MailTransport;
+  } = {}
+): Promise<DecisionResult> {
+  const result =
+    intent === "approve"
+      ? approveRefundRequest(db, refundRequestId, platformAdminId, note, now)
+      : declineRefundRequest(
+          db,
+          refundRequestId,
+          platformAdminId,
+          note ?? "",
+          now
+        );
+  if (!result.ok) return result;
+  const decided = selectRefundRequests(db)
+    .where(eq(refunds.id, refundRequestId))
+    .get();
+  if (decided) {
+    const approved = decided.status === RefundStatus.Approved;
+    await deliverNotification(
+      {
+        kind: approved ? "refund-request-approved" : "refund-request-declined",
+        recordId: refundRequestId,
+        recipientIds: [decided.purchase.userId],
+        actorId: platformAdminId,
+        data: {
+          category: "refundRequestUpdates",
+          title: approved
+            ? "Refund Request approved"
+            : "Refund Request declined",
+          context: [
+            decided.courseTitle,
+            `Purchase #${decided.purchase.id}`,
+            decided.decisionNote,
+            approved ? null : "You may raise another Refund Request.",
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          destination: `/settings#refund-request-${refundRequestId}`,
+          source: {
+            refundRequestId,
+            purchaseId: decided.purchase.id,
+            courseId: decided.purchase.courseId,
+          },
+          snapshot: {
+            courseTitle: decided.courseTitle,
+            decisionNote: decided.decisionNote,
+          },
+        },
+      },
+      dependencies.notifications
+    );
+  }
+  await sendEmail(result.email, dependencies.mail);
+  return result;
 }
 
 /** The email the buyer gets once their Refund Request is decided. */

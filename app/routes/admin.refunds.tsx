@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { Route } from "./+types/admin.refunds";
 import { getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
-import { RefundStatus, UserRole, users } from "~/db/schema";
+import { RefundStatus, UserRole, refunds, users } from "~/db/schema";
 import { db } from "~/db";
 import { eq } from "drizzle-orm";
 import { Card, CardContent } from "~/components/ui/card";
@@ -15,17 +15,18 @@ import { AlertTriangle, Receipt } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
 import { formatPrice } from "~/lib/utils";
 import {
-  approveRefundRequest,
-  declineRefundRequest,
+  submitRefundDecision,
   listRefundRequestsForReview,
   type RefundRequestForReview,
 } from "~/lib/refunds.server";
 import { RULE_BREAK_LABELS } from "~/lib/refund-rules";
-import { sendEmail } from "~/lib/mailer.server";
+import { mailTransportContext } from "~/lib/mailer.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 
 const refundFilterSchema = z
   .nativeEnum(RefundStatus)
   .catch(RefundStatus.Open);
+const refundTargetSchema = z.coerce.number().int().positive().safe().optional();
 
 const adminRefundActionSchema = z.discriminatedUnion("intent", [
   z.object({
@@ -83,7 +84,22 @@ export function meta() {
 export async function loader({ request, url }: Route.LoaderArgs) {
   await requirePlatformAdmin(request);
 
-  const status = refundFilterSchema.parse(url.searchParams.get("status"));
+  let status = refundFilterSchema.parse(url.searchParams.get("status"));
+  const target = refundTargetSchema.safeParse(
+    url.searchParams.get("refundRequestId") ?? undefined
+  );
+  if (!target.success) throw data("Invalid Refund Request.", { status: 400 });
+  if (target.data !== undefined) {
+    const refundRequest = db
+      .select({ status: refunds.status })
+      .from(refunds)
+      .where(eq(refunds.id, target.data))
+      .get();
+    if (!refundRequest)
+      throw data("Refund Request not found.", { status: 404 });
+    // Retained opening Notifications keep their original URL after a decision.
+    status = refundRequest.status;
+  }
 
   return {
     status,
@@ -91,7 +107,7 @@ export async function loader({ request, url }: Route.LoaderArgs) {
   };
 }
 
-export async function action({ request }: Route.ActionArgs) {
+export async function action({ request, context }: Route.ActionArgs) {
   const platformAdmin = await requirePlatformAdmin(request);
 
   const formData = await request.formData();
@@ -106,28 +122,22 @@ export async function action({ request }: Route.ActionArgs) {
 
   const { intent, refundRequestId, note } = parsed.data;
 
-  const result =
-    intent === "approve"
-      ? approveRefundRequest(
-          db,
-          refundRequestId,
-          platformAdmin.id,
-          note || null,
-          new Date()
-        )
-      : declineRefundRequest(
-          db,
-          refundRequestId,
-          platformAdmin.id,
-          note,
-          new Date()
-        );
+  const result = await submitRefundDecision(
+    db,
+    refundRequestId,
+    platformAdmin.id,
+    intent,
+    note || null,
+    new Date(),
+    {
+      notifications: context.get(notificationTransportContext) ?? undefined,
+      mail: context.get(mailTransportContext) ?? undefined,
+    }
+  );
 
   if (!result.ok) {
     return data({ error: result.error }, { status: result.status });
   }
-
-  await sendEmail(result.email);
 
   return {
     success: true,
@@ -288,7 +298,7 @@ function RefundRequestCard({
   }
 
   return (
-    <Card>
+    <Card id={`refund-request-${refundRequest.id}`} className="scroll-mt-6">
       <CardContent className="space-y-4 p-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
