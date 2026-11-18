@@ -65,8 +65,7 @@ cutoff and at most four people being scanned concurrently. It inspects retained
 depending on an expired trigger-data index. All persisted person IDs are supplied
 because course ownership and roles can change after delivery. This adds requests
 proportional to people and their feed history, but requires no local Notification
-store, message mapping, webhook, or worker. This composition is inferred from
-the documented endpoints and remains pending live acceptance.
+store, message mapping, webhook, or worker. This composition follows the documented feed/status APIs. Live lookup and recent archival checks passed; controlled adapter tests cover entries absent from expired message logs.
 [Retention policy](https://docs.knock.app/manage-your-account/data-retention),
 [server feed API](https://github.com/knocklabs/knock-node/blob/main/src/resources/users/feeds.ts)
 
@@ -100,4 +99,4 @@ Both Development workflows are published, active, and valid. The [2026-11-18 liv
 
 Recent archival checks deleted a Question with surviving Replies, confirmed the open feed refreshed, followed a surviving Reply to its exact target, and then deleted one Reply while preserving another. A further check reassigned the course before deletion and confirmed that the former Instructor's Notification was still archived.
 
-Archival beyond the message-log retention window remains pending. The implementation uses filtered message lookup plus retained-feed discovery across persisted people. Trigger responses contain workflow run IDs before message creation; the best-effort attempt does not retry a Notification that appears only after discovery has finished.
+Retention behavior follows the documented vendor contract and controlled old-item tests; no naturally aged live experiment is claimed. The implementation uses filtered message lookup plus retained-feed discovery across persisted people. Trigger responses contain workflow run IDs before message creation; the best-effort attempt does not retry a Notification that appears only after discovery has finished.

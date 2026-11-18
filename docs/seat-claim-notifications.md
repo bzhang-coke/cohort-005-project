@@ -35,4 +35,4 @@ preferences, snapshots, complete commit, rejection and failure. The Cadence
 client test covers exact navigation and read-only checkmark behavior; Team route
 tests cover rendered anchors and access. Development workflow publication and
 adapter delivery passed in the [2026-11-17–18 live checks](notification-live-verification.md).
-The subsequent browser run verified a real Seat claim, independent buyer/Instructor deliveries, the remaining Seat count, and exact Seat navigation. Provider category suppression was also verified. Aged-history behavior remains pending.
+The subsequent browser run verified a real Seat claim, independent buyer/Instructor deliveries, the remaining Seat count, and exact Seat navigation. Provider category suppression was also verified. A later live claim after Instructor opt-out still delivered the independent Seat claim; the inverse mute combination also passed. Retention evidence is in the shared report.

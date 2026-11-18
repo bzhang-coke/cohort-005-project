@@ -47,10 +47,30 @@ The user authorized backfill of `/Users/O28845/GitHub/AI_hero/cohort-005-project
 
 Evidence is under `/private/tmp/cadence-spec-33/live-browser-20261118/`: `history-result.json`, `domain-result.json`, `preferences-archive-result.json`, `recovery-result.json`, `renewal-result.json`, `session-security-result.json`, `final-verification-result.json`, `logout-result.json`, and `former-recipient-result.json`. The recovery report has five passing recovery/switching phases followed by a superseded renewal-harness failure; the separate renewal report establishes the passing renewal result. Screenshots include `live-history.png`, `live-feed-narrow.png`, and `live-discussion.png`.
 
-## Repository verification and remaining external evidence
+## Ticket closure checks
 
-`npm run typecheck` passed, followed by `npm run test`: **731 tests across 35 files**. Coverage includes empty sets, preservation of global/channel/workflow/commercial/future choices, malformed-field failures, read bursts within the provider quota, and disposal of a queued read. Vitest uses fake transports and does not contact Knock.
+The final targeted checks in `/private/tmp/cadence-spec-33/closure/live-closure-result.json` passed:
 
-PRD #33 remains open for evidence beyond message-log retention. The Development channel was created on **2026-11-15**. Confirm that recipient-scoped bulk seen/read includes retained entries after message-log expiry, and that rich data/source fields remain sufficient for old Discussion archival. Recent-item success and fabricated timestamps do not establish those guarantees. Knock documents indefinite feed retention and continued status updates, while its bulk endpoint carries a retention-policy label. [Retention policy](https://docs.knock.app/manage-your-account/data-retention), [bulk status endpoint](https://docs.knock.app/api-reference/channels/bulk/update_message_status)
+- A real Refund Request with buyer feed updates muted produced its confirmation email in the local outbox and notified Platform Admins, while its completed buyer workflow produced no feed entry (#37).
+- A real claim with Seat claims muted still notified the opted-in Instructor. After Instructor opt-out, a subsequent real claim notified the Team Licence owner without an Enrollment Notification. Buying the new Team Licence alone created no Enrollment (#42–43).
+- Avatar changes in the isolated Cadence records were sent through the actual Profile action and identity-sync path. Existing Discussion and Refund rows rendered the new image in the browser without changing their snapshot data or read state (#39–40). The fixture avatar change supplies the profile image; it does not add an avatar-upload feature.
 
-The [full checklist](notification-feed.md#verification-and-pending-live-acceptance) remains the acceptance contract. These verified scenarios do not establish every failure timing, multi-role combination, or future environment-level preference configuration. Read pacing is per client; multiple tabs and server operations still share the provider quota.
+### Standards review
+
+The independent Standards review of `b8332d0...5b364c6` found no documented-standard breaches and no baseline smells warranting a finding. It checked `AGENTS.md`, `CODING_STANDARDS.md`, relevant glossary terms, and ADR 0006. Repetition in independently deployed workflow definitions was judged appropriate.
+
+### Spec review
+
+The independent Spec review found three live-evidence gaps: muted confirmation plus email (#37), an avatar refresh through the sync lifecycle on an existing row (#40), and a real post-opt-out Enrollment with independent Seat delivery (#43). The targeted checks above resolve all three. No incorrect implementation or unrequested behavior was established.
+
+Review totals: Standards 0 findings; Spec 3 evidence findings, all resolved.
+
+## Repository verification and retention evidence
+
+`npm run typecheck` passed, followed by `npm run test`: **731 tests across 35 files**. The production build also passed. Coverage includes empty sets, preservation of global/channel/workflow/commercial/future choices, malformed-field failures, read bursts within the provider quota, and disposal of a queued read. Vitest uses fake transports and does not contact Knock.
+
+The final review corrected an overly strict closure gate in the earlier report. #38 requires documented retention constraints plus live paging and bulk operations beyond loaded entries; it does not require a weeks-long aging experiment. Knock documents indefinite feed history and status updates after message-log expiry. [Retention policy](https://docs.knock.app/manage-your-account/data-retention). Its SDK describes server operations over all feed items in scope. [Feed SDK](https://docs.knock.app/in-app-ui/javascript/sdk/feed-client). The generic retention badge also labels individual read/archive APIs, so the badge alone does not establish a feed cutoff. [Message endpoints](https://docs.knock.app/api-reference/messages).
+
+Cadence uses rich, unarchived feed history without a date filter, recipient-scoped channel bulk status changes, and retained-feed discovery for archival. The documented contract, live unloaded-item checks, and controlled old-item adapter tests satisfy the ticket's evidence requirement. The channel was created on **2026-11-15**; naturally aged entries were not tested and no such experiment is claimed. This distinguishes documented guarantees from live observations instead of substituting a finite history window.
+
+The [full checklist](notification-feed.md#verification-and-acceptance-record) remains the acceptance contract. Service tests cover the role/holding and failure matrices; live tests verify the specified integration scenarios. Read pacing is per client; multiple tabs and server operations still share the provider quota. Deployment to Production is separate from this Development acceptance and was not performed.
