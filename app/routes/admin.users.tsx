@@ -20,6 +20,8 @@ import {
 } from "~/components/ui/select";
 import { AlertTriangle, Pencil, Shield, Users } from "lucide-react";
 import { data, isRouteErrorResponse, Link } from "react-router";
+import { syncNotificationPerson } from "~/lib/notifications.server";
+import { notificationTransportContext } from "~/lib/notifications/transport.server";
 
 const adminUserActionSchema = z.discriminatedUnion("intent", [
   z.object({
@@ -95,7 +97,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   return { users };
 }
 
-export async function action({ request }: Route.ActionArgs) {
+export async function action({ request, context }: Route.ActionArgs) {
   const currentUserId = await getCurrentUserId(request);
 
   if (!currentUserId) {
@@ -119,13 +121,18 @@ export async function action({ request }: Route.ActionArgs) {
   if (intent === "update-user") {
     const { userId, name, email } = parsed.data;
     const user = getUserById(userId);
-    updateUser(userId, name, email, user?.bio ?? null);
+    if (!user) throw data("User not found.", { status: 404 });
+    const updated = updateUser(userId, name, email, user.bio);
+    if (!updated) throw data("User not found.", { status: 404 });
+    await syncNotificationPerson(updated, context.get(notificationTransportContext));
     return { success: true };
   }
 
   if (intent === "update-role") {
     const { userId, role } = parsed.data;
-    updateUserRole(userId, role);
+    const updated = updateUserRole(userId, role);
+    if (!updated) throw data("User not found.", { status: 404 });
+    await syncNotificationPerson(updated, context.get(notificationTransportContext));
     return { success: true };
   }
 

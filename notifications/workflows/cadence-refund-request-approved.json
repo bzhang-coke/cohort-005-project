@@ -1,0 +1,23 @@
+{
+  "workflow": {
+    "name": "Cadence Refund Request approval",
+    "description": "Tells the Purchase buyer that their Refund Request was approved. This records a decision, not a payout.",
+    "categories": ["refund-request-updates"],
+    "settings": {
+      "override_preferences": false
+    },
+    "trigger_frequency": "every_trigger",
+    "steps": [
+      {
+        "ref": "feed",
+        "type": "channel",
+        "channel_type": "in_app_feed",
+        "channel_key": "SET_KNOCK_FEED_CHANNEL_KEY",
+        "template": {
+          "markdown_body": "{{ data.title }}\n\n{{ data.context }}",
+          "action_url": "{{ data.destination }}"
+        }
+      }
+    ]
+  }
+}

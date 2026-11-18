@@ -1,0 +1,21 @@
+{
+  "workflow": {
+    "name": "Cadence Discussion Question",
+    "description": "Tells the owning Instructor about another person's new Discussion Question. Cadence owns the text, recipient and event identity.",
+    "categories": ["discussion-questions"],
+    "settings": { "override_preferences": false },
+    "trigger_frequency": "every_trigger",
+    "steps": [
+      {
+        "ref": "feed",
+        "type": "channel",
+        "channel_type": "in_app_feed",
+        "channel_key": "SET_KNOCK_FEED_CHANNEL_KEY",
+        "template": {
+          "markdown_body": "{{ data.title }}\n\n{{ data.context }}",
+          "action_url": "{{ data.destination }}"
+        }
+      }
+    ]
+  }
+}

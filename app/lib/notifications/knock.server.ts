@@ -1,0 +1,393 @@
+import { z } from "zod";
+import {
+  notificationCategories,
+  type NotificationCategory,
+  type NotificationPreferences,
+} from "../notifications";
+import type { NotificationTransport } from "./transport.server";
+
+// All vendor vocabulary stays in this adapter.
+const categoryKeys: Record<NotificationCategory, string> = {
+  refundRequestUpdates: "refund-request-updates",
+  seatClaims: "seat-claims",
+  enrollments: "enrollments",
+  discussionQuestions: "discussion-questions",
+  openRefundRequests: "open-refund-requests",
+  discussionReplies: "discussion-replies",
+};
+
+const categorySchema = z.union([
+  z.boolean(),
+  z
+    .object({
+      channel_types: z.record(z.unknown()).nullish(),
+      channels: z.record(z.unknown()).nullish(),
+    })
+    .passthrough(),
+]);
+const preferenceSetSchema = z
+  .object({
+    id: z.string(),
+    categories: z.record(z.unknown()).nullish(),
+    channels: z.record(z.unknown()).nullish(),
+    channel_types: z.record(z.unknown()).nullish(),
+    workflows: z.record(z.unknown()).nullish(),
+    commercial_subscribed: z.boolean().nullish(),
+  })
+  .passthrough();
+type PreferenceSet = z.infer<typeof preferenceSetSchema>;
+
+const discussionItemSchema = z.object({
+  id: z.string().min(1),
+  data: z.object({ commentId: z.number() }),
+  source: z.object({
+    key: z.enum([
+      "cadence-discussion-question-created",
+      "cadence-discussion-reply-created",
+    ]),
+  }),
+});
+const discussionMessageSchema = discussionItemSchema.extend({
+  channel: z.object({ id: z.string() }),
+});
+const messagePageSchema = z.object({
+  items: z.array(z.unknown()),
+  page_info: z.object({ after: z.string().min(1).nullable() }),
+});
+const feedPageSchema = z.object({
+  entries: z.array(z.unknown()),
+  page_info: z.object({ after: z.string().min(1).nullable() }),
+});
+
+// Cadence is one process (ADR 0006). Share this across adapter instances so
+// identity writes, initialization, and preference saves stay ordered per person.
+const pending = new Map<string, Promise<unknown>>();
+async function serialized<T>(
+  key: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const previous = pending.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation);
+  pending.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (pending.get(key) === current) pending.delete(key);
+  }
+}
+
+export function knockNotificationTransport(
+  config: { secretApiKey: string; feedChannelId: string },
+  fetcher: typeof fetch = fetch
+): NotificationTransport {
+  async function archiveRequest(path: string, method = "GET") {
+    const response = await fetcher(`https://api.knock.app/v1${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${config.secretApiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Knock Notification archival request failed (${response.status}).`
+      );
+    }
+    return response;
+  }
+
+  async function request(personId: number, suffix: string, body?: unknown) {
+    const response = await fetcher(
+      `https://api.knock.app/v1/users/${personId}${suffix}`,
+      {
+        method: body === undefined ? "GET" : "PUT",
+        headers: {
+          Authorization: `Bearer ${config.secretApiKey}`,
+          "Content-Type": "application/json",
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (!response.ok)
+      throw new Error(
+        `Knock Notification request failed (${response.status}).`
+      );
+    const result: unknown = await response.json();
+    return result;
+  }
+
+  async function storedSet(personId: number) {
+    // Knock returns the same all-null default set for a fresh person and a
+    // saved empty set. Both need initialization; any actual preference remains
+    // untouched, including global restrictions and unknown future settings.
+    const sets = z
+      .array(preferenceSetSchema)
+      .parse(await request(personId, "/preferences"));
+    const set = sets.find((set) => set.id === "default");
+    if (!set) return null;
+    const hasPreferences = Object.entries(set).some(([key, value]) => {
+      if (
+        key === "id" ||
+        key === "__typename" ||
+        value === undefined ||
+        value === null
+      )
+        return false;
+      return (
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.keys(value).length > 0
+      );
+    });
+    return hasPreferences ? set : null;
+  }
+
+  function preferences(set: PreferenceSet): NotificationPreferences {
+    const result: NotificationPreferences = {};
+    for (const category of notificationCategories) {
+      const value = set.categories?.[categoryKeys[category]];
+      if (value === undefined) continue;
+      const parsed = categorySchema.parse(value);
+      const feed =
+        typeof parsed === "boolean"
+          ? parsed
+          : (parsed.channels?.[config.feedChannelId] ??
+            parsed.channel_types?.in_app_feed);
+      const email =
+        typeof parsed === "boolean" ? undefined : parsed.channel_types?.email;
+      result[category] = {
+        channels: {
+          ...(typeof email === "boolean" ? { email } : {}),
+          ...(feed === undefined ? {} : { feed: z.boolean().parse(feed) }),
+        },
+      };
+    }
+    return result;
+  }
+
+  return {
+    available: true,
+    async archiveComment(source) {
+      const ids = new Set<string>();
+      const failures: unknown[] = [];
+      const query = new URLSearchParams({
+        channel_id: config.feedChannelId,
+        trigger_data: JSON.stringify({ commentId: source.commentId }),
+        page_size: "100",
+      });
+      let after: string | null = null;
+      const messageCursors = new Set<string>();
+      try {
+        do {
+          if (after) query.set("after", after);
+          const response = await archiveRequest(`/messages?${query}`);
+          const result: unknown = await response.json();
+          const page = messagePageSchema.parse(result);
+          for (const item of page.items) {
+            const parsed = discussionMessageSchema.safeParse(item);
+            if (
+              parsed.success &&
+              parsed.data.data.commentId === source.commentId &&
+              parsed.data.channel.id === config.feedChannelId
+            )
+              ids.add(parsed.data.id);
+          }
+          after = page.page_info.after;
+          if (after) {
+            if (messageCursors.has(after))
+              throw new Error("Knock repeated a message cursor.");
+            messageCursors.add(after);
+          }
+        } while (after);
+      } catch (error) {
+        failures.push(error);
+      }
+
+      // Message logs expire while feed entries remain. Inspect retained feed
+      // data without depending on a trigger-data index surviving log retention.
+      // A person's role or course ownership today does not prove past audience.
+      const personIds = [...new Set(source.personIds)];
+      for (let offset = 0; offset < personIds.length; offset += 4) {
+        await Promise.all(
+          personIds.slice(offset, offset + 4).map(async (personId) => {
+            try {
+              const feedQuery = new URLSearchParams({
+                status: "all",
+                archived: "exclude",
+                mode: "rich",
+                page_size: "100",
+              });
+              let cursor: string | null = null;
+              const feedCursors = new Set<string>();
+              do {
+                if (cursor) feedQuery.set("after", cursor);
+                const response = await archiveRequest(
+                  `/users/${personId}/feeds/${encodeURIComponent(config.feedChannelId)}?${feedQuery}`
+                );
+                const result: unknown = await response.json();
+                const page = feedPageSchema.parse(result);
+                for (const item of page.entries) {
+                  const parsed = discussionItemSchema.safeParse(item);
+                  if (
+                    parsed.success &&
+                    parsed.data.data.commentId === source.commentId
+                  ) {
+                    ids.add(parsed.data.id);
+                  }
+                }
+                cursor = page.page_info.after;
+                if (cursor) {
+                  if (feedCursors.has(cursor))
+                    throw new Error("Knock repeated a feed cursor.");
+                  feedCursors.add(cursor);
+                }
+              } while (cursor);
+            } catch (error) {
+              failures.push(error);
+            }
+          })
+        );
+      }
+
+      // Complete discovery before changing archived status, so cursor movement
+      // in the unarchived feed cannot make a later matching item disappear.
+      for (const id of ids) {
+        try {
+          await archiveRequest(
+            `/messages/${encodeURIComponent(id)}/archived`,
+            "PUT"
+          );
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length) {
+        throw new AggregateError(
+          failures,
+          "Notification archival was incomplete."
+        );
+      }
+    },
+    async trigger(event) {
+      const response = await fetcher(
+        `https://api.knock.app/v1/workflows/cadence-${event.kind}/trigger`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.secretApiKey}`,
+            "Content-Type": "application/json",
+            "Idempotency-Key": event.idempotencyKey,
+          },
+          body: JSON.stringify({
+            recipients: event.recipientIds.map(String),
+            ...(event.actorId === null ? {} : { actor: String(event.actorId) }),
+            data: {
+              ...event.data,
+              eventKind: event.kind,
+              eventId: String(event.recordId),
+              ...(event.data.source.commentId === undefined
+                ? {}
+                : { commentId: event.data.source.commentId }),
+            },
+          }),
+          signal: AbortSignal.timeout(10_000),
+        }
+      );
+      if (!response.ok)
+        throw new Error(
+          `Knock Notification trigger failed (${response.status}).`
+        );
+      z.object({ workflow_run_id: z.string().min(1) }).parse(
+        await response.json()
+      );
+    },
+    async identify(person) {
+      return serialized(`${config.secretApiKey}:${person.id}`, async () => {
+        await request(person.id, "", {
+          name: person.name,
+          email: person.email,
+          avatar: person.avatarUrl,
+        });
+      });
+    },
+    async getPreferences(personId) {
+      const set = await storedSet(personId);
+      return set ? preferences(set) : null;
+    },
+    async initializePreferences(personId, defaults) {
+      return serialized(`${config.secretApiKey}:${personId}`, async () => {
+        const existing = await storedSet(personId);
+        if (existing) return preferences(existing);
+        const categories = Object.fromEntries(
+          notificationCategories.map((category) => [
+            categoryKeys[category],
+            {
+              channel_types: {
+                in_app_feed: defaults[category]?.channels.feed ?? false,
+              },
+            },
+          ])
+        );
+        const saved = preferenceSetSchema.parse(
+          await request(personId, "/preferences/default", {
+            __persistence_strategy__: "merge",
+            categories,
+          })
+        );
+        const initialized = preferences(saved);
+        if (
+          notificationCategories.some(
+            (category) =>
+              initialized[category]?.channels.feed !==
+              defaults[category]?.channels.feed
+          )
+        ) {
+          throw new Error(
+            "Knock did not confirm Notification preference initialization."
+          );
+        }
+        return initialized;
+      });
+    },
+    async setPreference(personId, change) {
+      return serialized(`${config.secretApiKey}:${personId}`, async () => {
+        const existing = await storedSet(personId);
+        if (!existing)
+          throw new Error("Notification preferences are not initialized.");
+        const current = existing.categories?.[categoryKeys[change.category]];
+        const parsed =
+          current === undefined ? undefined : categorySchema.parse(current);
+        const existingChannels =
+          typeof parsed === "object" ? parsed.channels : undefined;
+        const saved = preferenceSetSchema.parse(
+          await request(personId, "/preferences/default", {
+            __persistence_strategy__: "merge",
+            categories: {
+              [categoryKeys[change.category]]: {
+                // A scalar mute covers every currently supported channel type.
+                // Expand it before enabling feed so email/SMS/etc. remain muted.
+                channel_types: {
+                  ...(current === false
+                    ? {
+                        email: false,
+                        sms: false,
+                        push: false,
+                        chat: false,
+                        http: false,
+                      }
+                    : {}),
+                  in_app_feed: change.enabled,
+                },
+                ...(existingChannels?.[config.feedChannelId] === undefined
+                  ? {}
+                  : {
+                      channels: { [config.feedChannelId]: change.enabled },
+                    }),
+              },
+            },
+          })
+        );
+        return preferences(saved);
+      });
+    },
+  };
+}
