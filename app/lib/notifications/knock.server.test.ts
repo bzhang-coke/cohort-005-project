@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { setImmediate } from "node:timers/promises";
 import { z } from "zod";
 import { syncNotificationPerson } from "../notifications.server";
+import { defaultNotificationPreferences } from "../notifications";
 import { knockNotificationTransport } from "./knock.server";
 
 const object = z.record(z.unknown());
@@ -227,16 +228,72 @@ describe("Knock Notification adapter", () => {
     expect(await transport.getPreferences(person.id)).toBeNull();
   });
 
-  it("preserves an explicit empty preference set rather than replacing it with defaults", async () => {
-    const remote = vendor();
-    remote.preferences = { id: "default", categories: {} };
-    const transport = knockNotificationTransport(
-      { secretApiKey: "secret", feedChannelId: "feed-id" },
-      remote.fetcher
-    );
-    await syncNotificationPerson(person, transport);
-    expect(remote.preferences).toEqual({ id: "default", categories: {} });
-  });
+  it.each([
+    { id: "default", categories: {} },
+    {
+      id: "default",
+      __typename: "PreferenceSet",
+      categories: null,
+      channels: null,
+      channel_types: null,
+      workflows: null,
+      commercial_subscribed: null,
+    },
+  ])(
+    "initializes a completely empty Knock set with confirmed Cadence defaults: %j",
+    async (empty) => {
+      const remote = vendor();
+      remote.preferences = empty;
+      const transport = knockNotificationTransport(
+        { secretApiKey: "secret", feedChannelId: "feed-id" },
+        remote.fetcher
+      );
+      expect(await transport.getPreferences(person.id)).toBeNull();
+      expect(await syncNotificationPerson(person, transport)).toBe("ready");
+      expect(await transport.getPreferences(person.id)).toEqual(
+        defaultNotificationPreferences()
+      );
+    }
+  );
+
+  it.each([
+    { channel_types: { in_app_feed: false } },
+    { channels: { "feed-id": false } },
+    { workflows: { digest: false } },
+    { commercial_subscribed: false },
+    { categories: { "future-category": { channel_types: { email: false } } } },
+    { future_setting: { opted_in: false } },
+  ])(
+    "preserves existing choices outside Cadence categories during initialization: %j",
+    async (saved) => {
+      const remote = vendor();
+      const existing = { id: "default", categories: {}, ...saved };
+      remote.preferences = structuredClone(existing);
+      const transport = knockNotificationTransport(
+        { secretApiKey: "secret", feedChannelId: "feed-id" },
+        remote.fetcher
+      );
+      expect(await syncNotificationPerson(person, transport)).toBe("ready");
+      expect(remote.preferences).toEqual(existing);
+      expect(await transport.getPreferences(person.id)).toEqual({});
+    }
+  );
+
+  it.each(["channels", "channel_types", "workflows", "commercial_subscribed"])(
+    "does not replace malformed %s with defaults",
+    async (field) => {
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const remote = vendor();
+      remote.preferences = { id: "default", categories: null, [field]: [] };
+      const existing = structuredClone(remote.preferences);
+      const transport = knockNotificationTransport(
+        { secretApiKey: "secret", feedChannelId: "feed-id" },
+        remote.fetcher
+      );
+      expect(await syncNotificationPerson(person, transport)).toBe("failed");
+      expect(remote.preferences).toEqual(existing);
+    }
+  );
 
   it("fails closed on an ambiguous preference-list response", async () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);

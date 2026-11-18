@@ -18,7 +18,7 @@ export interface NotificationTransport {
   trigger(event: NotificationDelivery): Promise<void>;
   archiveComment(source: CommentNotificationArchive): Promise<void>;
   identify(person: NotificationPerson): Promise<void>;
-  // null means no person-owned preference set, never a confirmed default.
+  // null means absent or completely empty preferences, never confirmed defaults.
   getPreferences(personId: number): Promise<NotificationPreferences | null>;
   // Must preserve an existing set, including during overlapping syncs/saves.
   initializePreferences(

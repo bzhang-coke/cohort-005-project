@@ -96,18 +96,8 @@ the surviving Reply's rendered anchor and feed destination. Controlled API
 responses establish request shape and application behavior, not live Knock
 semantics.
 
-Live acceptance is pending: credentials were unavailable, and no provider
-request or workflow publish was performed. In Knock Development, publish and
-inspect both definitions, post a Question and Replies through both surfaces,
-check each category's suppression independently, and follow their exact
-destinations. Change a sender profile through the existing sync lifecycle and
-reload an older Notification to confirm its updated avatar while text remains
-unchanged. These checks must not be inferred from the fake-backed tests.
-For archival, verify the actual secret-key filtered lookup in Development;
-delete a Question with a surviving Reply and then a Reply, and verify feed
-disappearance, counts, and the surviving destination. Include retained entries
-beyond the message-log window and a former recipient after reassignment. The
-implemented approach is filtered lookup plus retained-feed discovery, not a
-comment-to-message mapping. Trigger responses contain workflow run IDs before
-message creation; the best-effort attempt does not retry a Notification that
-appears only after discovery has finished.
+Both Development workflows are published, active, and valid. The [2026-11-18 live checks](notification-live-verification.md) verified Questions and Replies from both writing surfaces, category suppression, exact comment destinations, message lookup by originating comment ID, and identity updates on retained recent rows.
+
+Recent archival checks deleted a Question with surviving Replies, confirmed the open feed refreshed, followed a surviving Reply to its exact target, and then deleted one Reply while preserving another. A further check reassigned the course before deletion and confirmed that the former Instructor's Notification was still archived.
+
+Archival beyond the message-log retention window remains pending. The implementation uses filtered message lookup plus retained-feed discovery across persisted people. Trigger responses contain workflow run IDs before message creation; the best-effort attempt does not retry a Notification that appears only after discovery has finished.

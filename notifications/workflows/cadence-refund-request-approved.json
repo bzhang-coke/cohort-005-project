@@ -14,7 +14,8 @@
         "channel_type": "in_app_feed",
         "channel_key": "SET_KNOCK_FEED_CHANNEL_KEY",
         "template": {
-          "markdown_body": "{{ data.title }}\n\n{{ data.context }}"
+          "markdown_body": "{{ data.title }}\n\n{{ data.context }}",
+          "action_url": "{{ data.destination }}"
         }
       }
     ]

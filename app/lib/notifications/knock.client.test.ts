@@ -9,6 +9,72 @@ const identity = {
   expiresAt: Date.now() + 3600000,
 };
 afterEach(() => vi.unstubAllGlobals());
+
+it("keeps bursts of feed reads below Knock's five-per-second limit without retrying", async () => {
+  vi.useFakeTimers();
+  const starts: number[] = [];
+  vi.stubGlobal("fetch", async () => {
+    const now = Date.now();
+    const recent = starts.filter((time) => now - time < 1000);
+    starts.push(now);
+    if (recent.length >= 5)
+      return Response.json({ error: "Rate limited" }, { status: 429 });
+    return Response.json({
+      entries: [],
+      meta: { total_count: 0, unread_count: 0, unseen_count: 0 },
+      page_info: { after: null },
+    });
+  });
+  const client = await knockNotificationFeedClient(
+    identity,
+    async () => identity
+  );
+  try {
+    const reads = Promise.allSettled(
+      Array.from({ length: 8 }, () => client.list())
+    );
+    await vi.advanceTimersByTimeAsync(3000);
+    expect((await reads).every((result) => result.status === "fulfilled")).toBe(
+      true
+    );
+    expect(starts).toHaveLength(8);
+    for (const start of starts)
+      expect(
+        starts.filter((time) => time >= start && time - start < 1000).length
+      ).toBeLessThanOrEqual(5);
+  } finally {
+    client.dispose();
+    vi.useRealTimers();
+  }
+});
+
+it("does not send a paced feed read after its client is disposed", async () => {
+  vi.useFakeTimers();
+  const fetcher = vi.fn(async () =>
+    Response.json({
+      entries: [],
+      meta: { total_count: 0, unread_count: 0, unseen_count: 0 },
+      page_info: { after: null },
+    })
+  );
+  vi.stubGlobal("fetch", fetcher);
+  const client = await knockNotificationFeedClient(
+    identity,
+    async () => identity
+  );
+  try {
+    await client.list();
+    const queued = Promise.allSettled([client.list()]);
+    await vi.advanceTimersByTimeAsync(1);
+    client.dispose();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((await queued)[0]?.status).toBe("rejected");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  } finally {
+    client.dispose();
+    vi.useRealTimers();
+  }
+});
 it("uses signed rich feeds and returns Cadence text, actor imagery, cursors and independent counts", async () => {
   const requests: { url: string; headers: Headers }[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {

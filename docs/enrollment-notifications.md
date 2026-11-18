@@ -20,7 +20,7 @@ KNOCK_FEED_CHANNEL_KEY=cadence-feed npm run notifications:provision -- --dry-run
 
 Automated checks use migrated SQLite, the shared fake transport, real authenticated actions/Settings, and the existing feed client interface. They prove local gating and modeled provider suppression, not live Knock behavior.
 
-Knock credentials were unavailable for this implementation. The workflow has not been provisioned or committed in Development, and no live message creation, avatar synchronization, or vendor preference suppression has been verified. With credentials, follow `docs/notification-feed.md` to provision, then verify:
+The workflow is committed, active, and valid in Development. The [2026-11-17–18 live checks](notification-live-verification.md) verified adapter delivery with a saved opt-in and confirmed that the production helper skips triggering when the saved preference is off. The subsequent live browser run also verified both Purchase and Seat claim paths, exact roster links, and a Lapsed Student returning with a distinct Enrollment while retaining progress. Provider-side suppression while muted was checked directly. The following remains the acceptance checklist:
 
 1. A new Individual Purchase and Claimed Seat produce no Enrollment feed message before opt-in.
 2. After the Instructor enables Enrollments in Settings, each path creates one Enrollment row with the Student avatar, course context and exact roster destination. Checkmarks remain on the current page; row activation marks read and navigates.

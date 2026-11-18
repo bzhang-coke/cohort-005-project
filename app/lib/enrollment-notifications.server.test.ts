@@ -220,6 +220,7 @@ function unclaimedSeat(ownerId = base.instructor.id) {
       courseId: base.course.id,
       amountPaid: 7900,
       country: "PL",
+      createdAt: NOW.toISOString(),
     })
     .returning()
     .get();

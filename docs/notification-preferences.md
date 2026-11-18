@@ -21,7 +21,7 @@ Fully keyless development uses the logging no-op. Its switches are unavailable a
 
 ## Sync and backfill
 
-Signup, Profile updates, Platform Admin edits, and seeding identify the person with name, email, and avatar. No account role is sent. Identity sync initializes all six category/feed defaults only when no person-owned default set exists: Enrollments off, the other five on. Existing sets, including explicit empty sets, are preserved. Failed initialization stays distinct from confirmed defaults.
+Signup, Profile updates, Platform Admin edits, and seeding identify the person with name, email, and avatar. No account role is sent. Identity sync initializes all six category/feed defaults when preferences are absent or completely empty: Enrollments off, the other five on. Any saved preference preserves the existing set, including global/channel/workflow restrictions, commercial subscription choices, unknown categories, and future settings. Failed initialization stays distinct from confirmed defaults.
 
 Before enabling later delivery slices, run this against the intended `data.db` and Knock environment:
 
@@ -41,7 +41,7 @@ The adapter uses vendor-side deep merge with only the changed category/feed leaf
 
 A legacy category-wide boolean is normalized when edited. A scalar mute becomes explicit false values for the six currently documented preference-map channel types, then the requested feed value is changed. This keeps current email, SMS, push, chat, and HTTP choices muted while allowing feed opt-in. It does not promise inherited scalar semantics for vendor channel types that do not yet exist. Existing object-shaped unknown channel data is left untouched. Global/workflow restrictions remain in Knock; a category switch controls that category, not those other restrictions.
 
-The adapter reads the list of person preference sets to distinguish an absent set from an explicit empty one. The direct default-set endpoint can return inherited environment defaults and is unsuitable for that distinction. The list endpoint is documented as listing a person's sets, but its omission of inherited/synthetic sets is still an inference requiring live verification. Unexpected list shapes and failed requests are errors, never evidence of absence. See [Knock preference APIs](https://docs.knock.app/api-reference/users/list_preferences), [custom preference centers](https://docs.knock.app/preferences/custom-preference-center), and [preference merge behavior](https://docs.knock.app/preferences/overview).
+Live verification on 2026-11-17 disproved the original absence detector: the list endpoint returns the same all-null `default` set for a fresh identified person and for an explicitly saved empty set. The user approved initializing both. The adapter ignores the set ID and type metadata when deciding whether any preference exists; null or empty maps contain no choice, while explicit booleans and populated maps do. Known malformed preference fields and failed requests remain errors, never evidence of absence. A nonempty inherited or externally managed set is preserved conservatively; this check does not claim to establish ownership of nonempty values. See [Knock preference APIs](https://docs.knock.app/api-reference/users/list_preferences) and [preference merge behavior](https://docs.knock.app/preferences/overview).
 
 ## Verification and remaining live acceptance
 
@@ -49,11 +49,6 @@ Automated tests use migrated SQLite and fake transports, plus controlled HTTP re
 
 Focused browser checks on 2026-11-17 used the real Settings page and GET route with controlled save responses: card placement, responsibilities plus holdings, optimistic feedback, persistence, rapid and overlapping flips, toast/rollback, pending-response isolation on person switching, and keyboard operation passed. The existing fixed sidebar squeezes Settings at narrow viewport widths; this ticket does not redesign that shell. These checks do not establish live provider behavior.
 
-**Live Knock Development acceptance remains pending: no credentials were available.** Before closing #36 or enabling delivery:
+Live Knock Development checks on 2026-11-17 passed against nine isolated acceptance identities: both empty-set cases receive all six defaults, Enrollment opt-in and category mutes persist, overlapping saves preserve unrelated future-channel settings, and repeated identity sync/backfill preserves choices and updates the standard avatar. Signed feed reads succeeded; unsigned and invalid tokens returned 400, and cross-person reads returned 403. The next day's workflow smoke confirmed Enrollment is skipped when its saved preference is off. See [live verification evidence and limits](notification-live-verification.md).
 
-1. For a fresh identified person, compare the list-sets and direct-default endpoints. Verify the list distinguishes no stored set, an explicit empty set, and inherited defaults. Revisit the absence detector if it does not.
-2. Verify all six stored category/feed defaults, opt into Enrollments, mute another category, and add an unrelated future-channel choice. Repeat identity sync and backfill; inspect fresh external state to confirm all choices persist and the standard avatar field updates.
-3. Exercise overlapping category saves and rapid same-category flips, then read the external saved result. Confirm the configured feed-channel override and partial-merge behavior match the controlled adapter tests.
-4. Simulate a failed initialization and confirm later Enrollment logic treats it as unavailable, never opted in. Delivery suppression itself belongs to subsequent event slices.
-
-Do not record these live checks as passed based only on the fake or historical prototypes.
+The 2026-11-18 browser checks additionally verified rapid/overlapping changes, configured feed-channel overrides, failed-save reconciliation, identity switching during pending reads, token renewal, and session expiry. The user-authorized application backfill reported 44 ready, zero failed, and zero disabled; remote read-back matched all 44 identities. Identity changes also appeared on retained recent feed rows without changing their snapshot text/read state. Future environment-level inheritance configurations and behavior after message-log expiry remain separate evidence requirements.

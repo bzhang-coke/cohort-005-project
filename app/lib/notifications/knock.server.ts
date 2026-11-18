@@ -29,6 +29,10 @@ const preferenceSetSchema = z
   .object({
     id: z.string(),
     categories: z.record(z.unknown()).nullish(),
+    channels: z.record(z.unknown()).nullish(),
+    channel_types: z.record(z.unknown()).nullish(),
+    workflows: z.record(z.unknown()).nullish(),
+    commercial_subscribed: z.boolean().nullish(),
   })
   .passthrough();
 type PreferenceSet = z.infer<typeof preferenceSetSchema>;
@@ -112,12 +116,29 @@ export function knockNotificationTransport(
   }
 
   async function storedSet(personId: number) {
-    // GET /preferences/default can synthesize environment defaults. The list
-    // endpoint describes the person's stored sets; an empty stored set counts.
+    // Knock returns the same all-null default set for a fresh person and a
+    // saved empty set. Both need initialization; any actual preference remains
+    // untouched, including global restrictions and unknown future settings.
     const sets = z
       .array(preferenceSetSchema)
       .parse(await request(personId, "/preferences"));
-    return sets.find((set) => set.id === "default") ?? null;
+    const set = sets.find((set) => set.id === "default");
+    if (!set) return null;
+    const hasPreferences = Object.entries(set).some(([key, value]) => {
+      if (
+        key === "id" ||
+        key === "__typename" ||
+        value === undefined ||
+        value === null
+      )
+        return false;
+      return (
+        typeof value !== "object" ||
+        Array.isArray(value) ||
+        Object.keys(value).length > 0
+      );
+    });
+    return hasPreferences ? set : null;
   }
 
   function preferences(set: PreferenceSet): NotificationPreferences {

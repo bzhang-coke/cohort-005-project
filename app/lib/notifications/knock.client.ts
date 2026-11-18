@@ -130,19 +130,17 @@ export async function knockNotificationFeedClient(
     params?: unknown
   ): Promise<unknown> {
     if (disposed) throw new Error("Notification connection closed.");
-    const response = await knock
-      .client()
-      .makeRequest({
-        method,
-        url,
-        data,
-        params,
-        signal: AbortSignal.any([
-          cancellation.signal,
-          AbortSignal.timeout(10000),
-        ]),
-        maxRetries: 0,
-      });
+    const response = await knock.client().makeRequest({
+      method,
+      url,
+      data,
+      params,
+      signal: AbortSignal.any([
+        cancellation.signal,
+        AbortSignal.timeout(10000),
+      ]),
+      maxRetries: 0,
+    });
     if (disposed) throw new Error("Notification connection closed.");
     if (
       response.statusCode !== "ok" ||
@@ -152,21 +150,36 @@ export async function knockNotificationFeedClient(
       throw new Error("Notification request failed.");
     return response.body;
   }
+  let feedRead: Promise<unknown> = Promise.resolve();
+  let nextFeedReadAt = 0;
   async function list(after?: string): Promise<NotificationPage> {
-    const page = pageSchema.parse(
-      await request(
-        "GET",
-        `/v1/users/${identity.personId}/feeds/${encodeURIComponent(identity.feedChannelId)}`,
-        undefined,
-        {
-          status: "all",
-          archived: "exclude",
-          mode: "rich",
-          page_size: 20,
-          ...(after ? { after } : {}),
-        }
-      )
-    );
+    // Knock allows five feed reads per second per person, across API keys.
+    // Page reconciliation and bulk-status confirmation share this queue. Four
+    // starts per second leaves room for a server-side archival lookup.
+    // This schedules requested reads only; it never polls or retries a write.
+    const queued = feedRead
+      .catch(() => undefined)
+      .then(async () => {
+        if (disposed) throw new Error("Notification connection closed.");
+        const delay = Math.max(0, nextFeedReadAt - Date.now());
+        if (delay)
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        nextFeedReadAt = Date.now() + 250;
+        return request(
+          "GET",
+          `/v1/users/${identity.personId}/feeds/${encodeURIComponent(identity.feedChannelId)}`,
+          undefined,
+          {
+            status: "all",
+            archived: "exclude",
+            mode: "rich",
+            page_size: 20,
+            ...(after ? { after } : {}),
+          }
+        );
+      });
+    feedRead = queued;
+    const page = pageSchema.parse(await queued);
     return {
       items: page.entries.map((entry) => {
         const actor = entry.actors[0];
