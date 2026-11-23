@@ -33,3 +33,9 @@ reports/
 
 # Emails written locally instead of sent
 .outbox/
+
+.stryker-tmp/
+
+core
+
+core.*

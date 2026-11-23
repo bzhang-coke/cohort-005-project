@@ -21,7 +21,11 @@
     "seed-wayfinder-issues": "bash scripts/seed-wayfinder-issues.sh",
     "db:migrate": "drizzle-kit migrate",
     "loc": "git ls-files | grep -vE '(lock|.db|_snapshot.json)' | xargs wc -l",
-    "notifications:provision": "tsx scripts/provision-notifications.ts"
+    "notifications:provision": "tsx scripts/provision-notifications.ts",
+    "lint:boundaries": "depcruise app --cache node_modules/.cache/dependency-cruiser",
+    "test:mutation": "tsx scripts/mutate-diff.ts",
+    "check": "npm run typecheck && npm run lint:boundaries && npm run test",
+    "prepare": "husky"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",
@@ -68,7 +72,11 @@
     "typescript": "^5.9.2",
     "vite": "^7.1.7",
     "vite-tsconfig-paths": "^5.1.4",
-    "vitest": "^5.0.5"
+    "vitest": "^5.0.5",
+    "husky": "^9.1.7",
+    "dependency-cruiser": "^18.6.0",
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0"
   },
   "allowScripts": {
     "better-sqlite3@12.11.1": true,

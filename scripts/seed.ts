@@ -66,6 +66,8 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS bookmarks;
+    DROP TABLE IF EXISTS notes;
     DROP TABLE IF EXISTS comments;
     DROP TABLE IF EXISTS course_ratings;
     DROP TABLE IF EXISTS video_watch_events;
@@ -2816,6 +2818,20 @@ This course is still in draft while the cluster examples are rewritten against t
   const notifications = await backfillNotificationPeople(db);
   console.log("Notification identity sync:", notifications);
 
+  // Private saved material for the first Student's TypeScript lessons.
+  db.insert(schema.bookmarks).values({
+    userId: students[0].id,
+    lessonId: course1LessonIds[0],
+    createdAt: daysAgo(2),
+  }).run();
+  db.insert(schema.notes).values({
+    userId: students[0].id,
+    lessonId: course1LessonIds[0],
+    body: "Review the TypeScript setup steps before starting the exercises.",
+    createdAt: daysAgo(2),
+    updatedAt: daysAgo(1),
+  }).run();
+
   // ─── Summary ───
 
   const sevenDaysAgo = daysAgo(7);
@@ -2845,6 +2861,7 @@ This course is still in draft while the cluster examples are rewritten against t
   console.log(`  Enrollments: ${countRows(schema.enrollments)}`);
   console.log(`  Course ratings: ${countRows(schema.courseRatings)}`);
   console.log(`  Lesson comments: ${countRows(schema.comments)}`);
+  console.log(`  Bookmarks: ${countRows(schema.bookmarks)}, Notes: ${countRows(schema.notes)}`);
   console.log(
     `  Lesson progress: ${countRows(schema.lessonProgress)} (${countRows(schema.lessonProgress, eq(schema.lessonProgress.status, LessonProgressStatus.Completed))} completed)`
   );
