@@ -6,6 +6,6 @@ export default defineConfig({
   test: {
     globals: true,
     setupFiles: ["./app/test/runtime.ts"],
-    exclude: [...configDefaults.exclude],
+    exclude: [...configDefaults.exclude, ".claude/**", "**/.stryker-tmp/**"],
   },
 });
