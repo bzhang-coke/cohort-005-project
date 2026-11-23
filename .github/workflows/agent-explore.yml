@@ -158,14 +158,14 @@ jobs:
         if: steps.batch.outputs.numbers != '[]'
         run: npm ci
 
-      - name: Install Claude Code
+      - name: Install Codex
         if: steps.batch.outputs.numbers != '[]'
-        run: npm install -g @anthropic-ai/claude-code
+        run: npm install -g @openai/codex
 
       - name: Explore
         if: steps.batch.outputs.numbers != '[]'
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OUTPUT_DIR: ${{ runner.temp }}
         # The plan comes back as plan.json, shaped and validated by
         # .sandcastle/agent-workflows/explore/plan-schema.ts.

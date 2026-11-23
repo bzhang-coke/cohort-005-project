@@ -1,6 +1,6 @@
+import * as sandcastle from "@ai-hero/sandcastle";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as sandcastle from "@ai-hero/sandcastle";
 
 export const outputDir = (): string => process.env.OUTPUT_DIR ?? "/tmp";
 
@@ -21,16 +21,11 @@ export const writeJson = (filename: string, value: unknown): void => {
   );
 };
 
-// The one agent every factory workflow runs. It authenticates with a Claude
-// subscription. To bill the API instead, pass ANTHROPIC_API_KEY here and in
-// the workflow's env in place of CLAUDE_CODE_OAUTH_TOKEN.
-//
-// Sandcastle runs every agent with its permission checks skipped, so it can
-// use any tool. Claude Code also accepts `permissionMode: "auto"` here for
-// AI-mediated approvals instead (Claude only; other agents don't offer it).
+// The shared agent uses Codex with the workflow's OpenAI API key.
+// Keep the existing factory name for the workflow entry points.
 export const claudeAgent = () =>
-  sandcastle.claudeCode("claude-opus-5-5", {
+  sandcastle.codex("gpt-6", {
     env: {
-      CLAUDE_CODE_OAUTH_TOKEN: required("CLAUDE_CODE_OAUTH_TOKEN"),
+      CODEX_API_KEY: required("OPENAI_API_KEY"),
     },
   });

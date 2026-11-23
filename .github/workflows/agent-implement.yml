@@ -129,8 +129,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install Codex
+        run: npm install -g @openai/codex
 
       - name: Migrate and seed the database
         # The agent gets a real database, because half of this repo's checks
@@ -184,7 +184,7 @@ jobs:
 
       - name: Build the ticket
         env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: npx tsx .sandcastle/agent-workflows/implement/implement.ts
 
       - name: Check the agent committed
