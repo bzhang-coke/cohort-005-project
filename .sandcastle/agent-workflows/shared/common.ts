@@ -23,9 +23,19 @@ export const writeJson = (filename: string, value: unknown): void => {
 
 // The shared agent uses Codex with the workflow's OpenAI API key.
 // Keep the existing factory name for the workflow entry points.
-export const claudeAgent = () =>
-  sandcastle.codex("gpt-6", {
+export const claudeAgent = () => {
+  const agent = sandcastle.codex("gpt-6", {
     env: {
       CODEX_API_KEY: required("OPENAI_API_KEY"),
     },
   });
+  return {
+    ...agent,
+    buildPrintCommand(options: sandcastle.AgentCommandOptions) {
+      const command = agent.buildPrintCommand(options);
+      // Sandcastle prefers stderr over Codex's structured error. Merge the
+      // streams so its stdin notice cannot hide authentication/model errors.
+      return { ...command, command: `${command.command} 2>&1` };
+    },
+  };
+};
