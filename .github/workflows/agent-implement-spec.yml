@@ -63,6 +63,7 @@ name: Agent — Implement A Spec
 #
 # WHAT IT NEEDS
 #
+#   vars.CODEX_MODEL — optional model override; defaults to gpt-6-astra.
 #   secrets.OPENAI_API_KEY — the agent's auth token. Both agents are
 #                               Sandcastle scripts in
 #                               .sandcastle/agent-workflows/implement-spec/.
@@ -309,6 +310,7 @@ jobs:
       - name: Decompose the spec into a queue
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
           OUTPUT_DIR: ${{ runner.temp }}
         # Reads only. The queue comes back as queue.json, shaped and validated
         # by .sandcastle/agent-workflows/implement-spec/decomposition-schema.ts.
@@ -478,6 +480,7 @@ jobs:
       - name: Build the ticket
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
         run: npx tsx .sandcastle/agent-workflows/implement-spec/build.ts
 
       - name: Check the agent committed

@@ -24,7 +24,8 @@ export const writeJson = (filename: string, value: unknown): void => {
 // The shared agent uses Codex with the workflow's OpenAI API key.
 // Keep the existing factory name for the workflow entry points.
 export const claudeAgent = () => {
-  const agent = sandcastle.codex("gpt-6", {
+  const model = process.env.CODEX_MODEL?.trim() || "gpt-6-astra";
+  const agent = sandcastle.codex(model, {
     env: {
       CODEX_API_KEY: required("OPENAI_API_KEY"),
     },

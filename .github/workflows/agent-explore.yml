@@ -55,6 +55,7 @@ name: Agent — Explore The Tickets
 #   its prompt next to it in prompt.md.
 #
 # WHAT IT NEEDS
+#   vars.CODEX_MODEL — optional model override; defaults to gpt-6-astra.
 #   secrets.OPENAI_API_KEY — the agent's auth token.
 #   secrets.FACTORY_PAT — a fine-grained personal access token on this
 #     repository. Every call this workflow makes to GitHub uses it: listing
@@ -167,6 +168,7 @@ jobs:
         if: steps.batch.outputs.numbers != '[]'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
           OUTPUT_DIR: ${{ runner.temp }}
         # The plan comes back as plan.json, shaped and validated by
         # .sandcastle/agent-workflows/explore/plan-schema.ts.
