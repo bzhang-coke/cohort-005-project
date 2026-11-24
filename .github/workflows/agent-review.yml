@@ -44,6 +44,7 @@ name: Agent — Review A Pull Request
 #   still a human's.
 #
 # WHAT IT NEEDS
+#   vars.CODEX_MODEL — optional model override; defaults to gpt-6-astra.
 #   secrets.OPENAI_API_KEY — the agent's auth token.
 #   secrets.FACTORY_PAT — the factory's one token. Only the steps that call
 #     GitHub get it; the agent's step does not. It pushes the review's
@@ -186,6 +187,7 @@ jobs:
       - name: Review the pull request
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
           OUTPUT_DIR: ${{ runner.temp }}
         run: npx tsx .sandcastle/agent-workflows/review/review.ts
 
